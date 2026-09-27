@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Blink · Temporary Linux VMs</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23131715'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23bc4228'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500&family=Geist+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="wrap bar-inner">
+    <a class="wordmark" href="/">blink<span class="stop">.</span></a>
+    <a class="link" id="console" href="#" target="_blank" rel="noreferrer" hidden>Compute Engine <span aria-hidden="true">↗</span></a>
+  </div>
+</header>
+
+<main class="wrap home" id="home">
+  <p class="eyebrow where"><span class="dot off" id="dot"></span><span id="where">Connecting</span></p>
+  <h1 class="display">Temporary Linux VMs<span class="stop">.</span></h1>
+
+  <section id="idle">
+    <div class="lede">
+      <p>Blink creates a VM in your Google Cloud project and opens its terminal on this page.</p>
+      <p class="muted">Compute Engine deletes it after <span data-ttl>30 min</span>.</p>
+    </div>
+    <dl class="specs">
+      <div><dt class="eyebrow">Machine</dt><dd id="spec-machine">&nbsp;</dd></div>
+      <div><dt class="eyebrow">Image</dt><dd id="spec-image">&nbsp;</dd></div>
+      <div><dt class="eyebrow">Zone</dt><dd id="spec-zone">&nbsp;</dd></div>
+      <div><dt class="eyebrow">Deleted after</dt><dd data-ttl>&nbsp;</dd></div>
+    </dl>
+    <div class="notice" id="notice" hidden>
+      <p class="eyebrow notice-label" id="notice-label"></p>
+      <p class="notice-text" id="notice-text"></p>
+      <div class="command" id="fix" hidden><code id="fix-text"></code><button class="btn btn-secondary btn-sm copy">Copy</button></div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary btn-lg" id="start" disabled>Start VM <span aria-hidden="true">→</span></button>
+      <button class="btn btn-secondary btn-lg" id="recheck" hidden>Check again</button>
+    </div>
+
+    <section class="how" aria-labelledby="how-title">
+      <p class="eyebrow" id="how-title">How it works</p>
+      <ol>
+        <li>
+          <span class="eyebrow">01</span>
+          <h3>Start</h3>
+          <p>Blink asks Compute Engine for the VM described above, with an SSH key generated for that VM only.</p>
+        </li>
+        <li>
+          <span class="eyebrow">02</span>
+          <h3>Connect</h3>
+          <p>Once the VM boots, Blink checks its SSH host key against the one Google publishes for it, then opens the terminal here.</p>
+        </li>
+        <li>
+          <span class="eyebrow">03</span>
+          <h3>Use</h3>
+          <p>You log in as <code>blink</code>, with sudo. Copy SSH command lets you connect from your own terminal as well.</p>
+        </li>
+        <li>
+          <span class="eyebrow">04</span>
+          <h3>Delete</h3>
+          <p>Compute Engine deletes the VM after <span data-ttl>30 min</span>, whether or not Blink is still running. Delete VM removes it sooner.</p>
+        </li>
+      </ol>
+    </section>
+  </section>
+
+  <section class="panel" id="progress" hidden>
+    <div class="panel-side">
+      <div>
+        <p class="eyebrow on-dark" id="p-name">New VM</p>
+        <p class="stat" id="clock">0.0</p>
+        <p class="eyebrow on-dark">Seconds</p>
+      </div>
+      <dl class="panel-facts">
+        <div><dt class="eyebrow on-dark">Machine</dt><dd id="p-machine"></dd></div>
+        <div><dt class="eyebrow on-dark">Image</dt><dd id="p-image"></dd></div>
+        <div><dt class="eyebrow on-dark">Deleted after</dt><dd id="p-ttl"></dd></div>
+      </dl>
+    </div>
+    <div class="panel-main">
+      <ol class="steps" id="steps" aria-live="polite">
+        <li data-step="requested"><p class="eyebrow">01</p><div class="step-row"><span class="step-name">Request</span><time></time></div><p class="step-note"></p></li>
+        <li data-step="creating"><p class="eyebrow">02</p><div class="step-row"><span class="step-name">Provision</span><time></time></div><p class="step-note"></p></li>
+        <li data-step="booting"><p class="eyebrow">03</p><div class="step-row"><span class="step-name">Boot</span><time></time></div><p class="step-note"></p></li>
+        <li data-step="ssh"><p class="eyebrow">04</p><div class="step-row"><span class="step-name">SSH</span><time></time></div><p class="step-note"></p></li>
+      </ol>
+      <div class="failure" id="failure" hidden>
+        <p class="failure-text" id="failure-text"></p>
+        <div class="command dark" id="failure-fix" hidden><code id="failure-fix-text"></code><button class="btn btn-outline-light btn-sm copy">Copy</button></div>
+        <div class="actions">
+          <button class="btn btn-light" id="retry">Try again</button>
+          <button class="btn btn-outline-light" id="back">Back</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<section class="shell" id="shell" hidden>
+  <div class="wrap shell-head">
+    <dl class="facts">
+      <div><dt class="eyebrow">VM</dt><dd id="s-name"></dd></div>
+      <div><dt class="eyebrow">Address</dt><dd id="s-ip"></dd></div>
+      <div><dt class="eyebrow">Ready in</dt><dd id="s-ready"></dd></div>
+      <div><dt class="eyebrow">Remaining</dt><dd id="s-left"></dd></div>
+    </dl>
+    <div class="actions">
+      <button class="btn btn-secondary" id="s-copy">Copy SSH command</button>
+      <button class="btn btn-danger" id="s-end">Delete VM</button>
+    </div>
+  </div>
+  <div class="wrap term-area">
+    <div class="term-panel">
+      <div class="term" id="term"></div>
+      <div class="curtain" id="curtain" hidden>
+        <p id="curtain-text"></p>
+        <button class="btn btn-light" id="curtain-btn"></button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
