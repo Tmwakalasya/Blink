@@ -72,6 +72,7 @@ function render(st) {
   if (!link.hidden) link.href = `https://console.cloud.google.com/compute/instances?project=${encodeURIComponent(st.project)}`;
   $('where-line').hidden = !u || !st.project;
   $('where').textContent = st.project ? `${st.project} / ${st.zone}` : '';
+  $('dialog-zone').textContent = st.zone ? `${st.zone} · ${st.place}` : '';
   $('conn').hidden = !u;
   $('dot').classList.toggle('off', !st.ready);
   $('conn-text').textContent = st.ready ? 'connected' : 'not connected';
@@ -620,9 +621,9 @@ async function ensureTerminal() {
     lineHeight: 1.25,
     scrollback: 5000,
     theme: {
-      background: '#131715', foreground: '#ecebe4', cursor: '#bc4228', cursorAccent: '#131715',
-      selectionBackground: 'rgba(188, 66, 40, 0.35)',
-      black: '#2a2f2b', red: '#d9674d', green: '#9dbb8a', yellow: '#dcc07a',
+      background: '#0b0d0c', foreground: '#e9eae4', cursor: '#e2643f', cursorAccent: '#0b0d0c',
+      selectionBackground: 'rgba(226, 100, 63, 0.3)',
+      black: '#242a26', red: '#d9674d', green: '#9dbb8a', yellow: '#dcc07a',
       blue: '#8aa7c4', magenta: '#bf9bbd', cyan: '#8fbdb4', white: '#dcdccd',
       brightBlack: '#646961', brightRed: '#e8866f', brightGreen: '#b6d1a3', brightYellow: '#ead59a',
       brightBlue: '#a9c1da', brightMagenta: '#d4b7d2', brightCyan: '#abd3cb', brightWhite: '#f7f7f2',

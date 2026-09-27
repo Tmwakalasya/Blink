@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
+<meta name="color-scheme" content="dark">
 <title>Blink · Temporary Linux VMs</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23131715'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23bc4228'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d0c'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23bc4228'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
@@ -26,7 +26,7 @@
 
 <main class="page" id="home">
   <section class="signin" id="signin" hidden>
-    <div class="signin-card">
+    <div class="dialog signin-card">
       <span class="mark mark-lg" aria-hidden="true"></span>
       <h1>Sign in to Blink</h1>
       <p class="muted">Temporary Linux VMs on Google Cloud, with VS Code and a terminal in the browser.</p>
@@ -40,127 +40,122 @@
   </section>
 
   <section id="idle" hidden>
-    <div class="page-head">
-      <div>
-        <h1>Virtual machines</h1>
-        <p class="muted">Temporary Linux VMs on Google Cloud. Compute Engine deletes each one when its lifetime ends.</p>
+    <div class="dialog">
+      <div class="dialog-head">
+        <h1>New VM</h1>
+        <span class="dialog-sub" id="dialog-zone"></span>
       </div>
-    </div>
-
-    <div class="notice" id="notice" hidden>
-      <p class="notice-label" id="notice-label"></p>
-      <p id="notice-text"></p>
-      <div class="command" id="fix" hidden><code id="fix-text"></code><button class="btn btn-secondary btn-xs copy">Copy</button></div>
-    </div>
-
-    <div class="create">
-      <div class="card">
-        <div class="card-head"><h2>New VM</h2></div>
-        <div class="field">
-          <p class="label" id="size-label">Size</p>
-          <div class="size-table" id="sizes" role="radiogroup" aria-labelledby="size-label"></div>
-        </div>
-        <div class="field">
-          <p class="label" id="ttl-label">Lifetime</p>
-          <div class="segmented" id="lifetimes" role="radiogroup" aria-labelledby="ttl-label"></div>
-        </div>
+      <div class="notice" id="notice" hidden>
+        <p class="notice-label" id="notice-label"></p>
+        <p id="notice-text"></p>
+        <div class="command" id="fix" hidden><code id="fix-text"></code><button class="btn btn-secondary btn-xs copy">Copy</button></div>
       </div>
-
-      <aside class="card summary">
-        <div class="card-head"><h2>Summary</h2></div>
+      <div class="section">
+        <p class="label" id="size-label">Size</p>
+        <div class="size-table" id="sizes" role="radiogroup" aria-labelledby="size-label"></div>
+      </div>
+      <div class="section">
+        <p class="label" id="ttl-label">Lifetime</p>
+        <div class="segmented" id="lifetimes" role="radiogroup" aria-labelledby="ttl-label"></div>
+      </div>
+      <div class="section">
         <dl class="kv">
           <div><dt>Machine</dt><dd id="sum-machine"></dd></div>
           <div><dt>Image</dt><dd id="sum-image"></dd></div>
           <div><dt>Zone</dt><dd id="sum-zone"></dd></div>
-          <div><dt>Lifetime</dt><dd id="sum-ttl"></dd></div>
+          <div><dt>Deleted after</dt><dd id="sum-ttl"></dd></div>
           <div class="kv-total"><dt>Estimated cost</dt><dd id="sum-cost"></dd></div>
         </dl>
-        <div class="summary-actions">
-          <button class="btn btn-primary btn-block" id="start" disabled>Create VM</button>
-          <button class="btn btn-secondary btn-block" id="recheck" hidden>Check again</button>
-          <p class="limit-note" id="limit-note" hidden></p>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn btn-primary btn-block" id="start" disabled>Create VM</button>
+        <button class="btn btn-secondary btn-block" id="recheck" hidden>Check again</button>
+        <p class="limit-note" id="limit-note" hidden></p>
+      </div>
+      <div class="meters" id="meters" hidden>
+        <div class="meter" id="budget-meter" hidden>
+          <div class="meter-row"><span>Budget</span><span class="mono" id="budget-text"></span></div>
+          <div class="track"><div class="fill" id="budget-fill"></div></div>
         </div>
-        <div class="meters" id="meters" hidden>
-          <div class="meter" id="budget-meter" hidden>
-            <div class="meter-row"><span>Budget</span><span class="mono" id="budget-text"></span></div>
-            <div class="track"><div class="fill" id="budget-fill"></div></div>
-          </div>
-          <div class="meter" id="week-meter" hidden>
-            <div class="meter-row"><span>Your hours this week</span><span class="mono" id="week-text"></span></div>
-            <div class="track"><div class="fill" id="week-fill"></div></div>
-          </div>
-          <div class="meter" id="vms-meter" hidden>
-            <div class="meter-row"><span>VMs running</span><span class="mono" id="vms-text"></span></div>
-            <div class="track"><div class="fill" id="vms-fill"></div></div>
-          </div>
+        <div class="meter" id="week-meter" hidden>
+          <div class="meter-row"><span>Your week</span><span class="mono" id="week-text"></span></div>
+          <div class="track"><div class="fill" id="week-fill"></div></div>
         </div>
-      </aside>
+        <div class="meter" id="vms-meter" hidden>
+          <div class="meter-row"><span>VMs running</span><span class="mono" id="vms-text"></span></div>
+          <div class="track"><div class="fill" id="vms-fill"></div></div>
+        </div>
+      </div>
     </div>
 
-    <section class="how" aria-labelledby="how-title">
-      <h2 id="how-title">How it works</h2>
-      <ol>
-        <li><span class="mono">01</span><h3>Create</h3><p>Compute Engine starts a VM of the size you picked, with an SSH key made for that VM alone.</p></li>
-        <li><span class="mono">02</span><h3>Connect</h3><p>Blink checks the VM's host key against the one Google publishes, then opens it here.</p></li>
-        <li><span class="mono">03</span><h3>Work</h3><p>Medium and Large open VS Code; every size has a terminal. You're <code>blink</code>, with sudo.</p></li>
-        <li><span class="mono">04</span><h3>Expire</h3><p>Compute Engine deletes the VM when its lifetime ends, even if Blink is offline.</p></li>
-      </ol>
-    </section>
+    <div class="stack">
+      <details class="how">
+        <summary>How Blink works</summary>
+        <ol>
+          <li><span class="mono">01</span><h3>Create</h3><p>Compute Engine starts a VM of the size you picked, with an SSH key made for that VM alone.</p></li>
+          <li><span class="mono">02</span><h3>Connect</h3><p>Blink checks the VM's host key against the one Google publishes, then opens it here.</p></li>
+          <li><span class="mono">03</span><h3>Work</h3><p>Medium and Large open VS Code; every size has a terminal. You're <code>blink</code>, with sudo.</p></li>
+          <li><span class="mono">04</span><h3>Expire</h3><p>Compute Engine deletes the VM when its lifetime ends, even if Blink is offline.</p></li>
+        </ol>
+      </details>
 
-    <section class="admin" id="admin" hidden>
-      <div class="card" id="requests" hidden>
-        <div class="card-head"><h2>Requests</h2></div>
-        <ul class="request-list" id="request-list"></ul>
-      </div>
-      <div class="card">
-        <div class="card-head"><h2>Who can sign in</h2><p class="muted">One email per line, or <code>@school.edu</code> for a whole domain.</p></div>
-        <textarea id="roster" rows="8" spellcheck="false" aria-label="Who can sign in"></textarea>
-        <div class="card-foot">
-          <span class="saved" id="roster-status" role="status"></span>
-          <button class="btn btn-primary btn-sm" id="save-roster">Save</button>
+      <section class="admin" id="admin" hidden>
+        <div class="card" id="requests" hidden>
+          <div class="card-head"><h2>Requests</h2></div>
+          <ul class="request-list" id="request-list"></ul>
         </div>
-      </div>
-      <div class="card">
-        <div class="card-head"><h2>Usage</h2><p class="muted">Last 7 days</p></div>
-        <table class="table" id="usage">
-          <thead><tr><th>Person</th><th>VMs</th><th>Hours</th><th>Cost</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </section>
+        <div class="card">
+          <div class="card-head"><h2>Who can sign in</h2><p class="muted">One email per line, or <code>@school.edu</code> for a domain.</p></div>
+          <textarea id="roster" rows="6" spellcheck="false" aria-label="Who can sign in"></textarea>
+          <div class="card-foot">
+            <span class="saved" id="roster-status" role="status"></span>
+            <button class="btn btn-primary btn-sm" id="save-roster">Save</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Usage</h2><p class="muted">Last 7 days</p></div>
+          <table class="table" id="usage">
+            <thead><tr><th>Person</th><th>VMs</th><th>Hours</th><th>Cost</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   </section>
 
   <section id="progress" hidden>
-    <div class="page-head">
-      <div>
-        <p class="crumb-line mono" id="p-name">new vm</p>
-        <h1 id="p-title">Creating VM</h1>
+    <div class="dialog">
+      <div class="dialog-head">
+        <div>
+          <p class="crumb-line mono" id="p-name">new vm</p>
+          <h1 id="p-title">Creating VM</h1>
+        </div>
+        <div class="head-right">
+          <span class="pill" id="p-status"><span class="dot"></span><span id="p-status-text">Provisioning</span></span>
+          <span class="timer mono" id="clock">0.0s</span>
+        </div>
       </div>
-      <div class="page-head-right">
-        <span class="pill" id="p-status"><span class="dot"></span><span id="p-status-text">Provisioning</span></span>
-        <span class="timer mono" id="clock">0.0s</span>
+      <ol class="tracker" id="steps">
+        <li data-step="requested"><span class="tick"></span><span class="tname">Request</span><time></time></li>
+        <li data-step="creating"><span class="tick"></span><span class="tname">Provision</span><time></time></li>
+        <li data-step="booting"><span class="tick"></span><span class="tname">Boot</span><time></time></li>
+        <li data-step="ssh"><span class="tick"></span><span class="tname">SSH</span><time></time></li>
+      </ol>
+      <div class="log" id="log" aria-live="polite"></div>
+      <div class="failure" id="failure" hidden>
+        <p id="failure-text"></p>
+        <div class="command" id="failure-fix" hidden><code id="failure-fix-text"></code><button class="btn btn-secondary btn-xs copy">Copy</button></div>
+        <div class="failure-actions">
+          <button class="btn btn-primary btn-sm" id="retry">Try again</button>
+          <button class="btn btn-secondary btn-sm" id="back">Back</button>
+        </div>
       </div>
+      <dl class="kv kv-inline">
+        <div><dt>Size</dt><dd id="p-size"></dd></div>
+        <div><dt>Machine</dt><dd id="p-machine"></dd></div>
+        <div><dt>Lifetime</dt><dd id="p-ttl"></dd></div>
+      </dl>
     </div>
-    <ol class="tracker" id="steps">
-      <li data-step="requested"><span class="tick"></span><span class="tname">Request</span><time></time></li>
-      <li data-step="creating"><span class="tick"></span><span class="tname">Provision</span><time></time></li>
-      <li data-step="booting"><span class="tick"></span><span class="tname">Boot</span><time></time></li>
-      <li data-step="ssh"><span class="tick"></span><span class="tname">SSH</span><time></time></li>
-    </ol>
-    <div class="log" id="log" aria-live="polite"></div>
-    <div class="failure" id="failure" hidden>
-      <p id="failure-text"></p>
-      <div class="command" id="failure-fix" hidden><code id="failure-fix-text"></code><button class="btn btn-secondary btn-xs copy">Copy</button></div>
-      <div class="failure-actions">
-        <button class="btn btn-primary btn-sm" id="retry">Try again</button>
-        <button class="btn btn-secondary btn-sm" id="back">Back</button>
-      </div>
-    </div>
-    <dl class="kv kv-inline">
-      <div><dt>Size</dt><dd id="p-size"></dd></div>
-      <div><dt>Machine</dt><dd id="p-machine"></dd></div>
-      <div><dt>Lifetime</dt><dd id="p-ttl"></dd></div>
-    </dl>
   </section>
 </main>
 

@@ -24,8 +24,20 @@ import (
 //go:embed deploy/blink-editor.service
 var editorUnit string
 
+// editorSettings opens VS Code straight into a dark editor: no welcome page,
+// no AI chat panel, no telemetry.
+const editorSettings = `{
+  "workbench.colorTheme": "Default Dark Modern",
+  "workbench.startupEditor": "none",
+  "workbench.secondarySideBar.defaultVisibility": "hidden",
+  "chat.disableAIFeatures": true,
+  "workbench.tips.enabled": false,
+  "telemetry.telemetryLevel": "off"
+}
+`
+
 // editorScript is the startup script for VMs that get the editor. On the
-// pre-built image it only makes sure VS Code is running.
+// pre-built image it only makes sure VS Code is set up and running.
 var editorScript = `#!/bin/bash
 set -euo pipefail
 export HOME=/root # startup scripts run without one, and the installer needs it
@@ -35,6 +47,13 @@ if [ ! -f /etc/systemd/system/blink-editor.service ]; then
   cat >/etc/systemd/system/blink-editor.service <<'UNIT'
 ` + editorUnit + `UNIT
   systemctl daemon-reload
+fi
+settings=/home/blink/.local/share/code-server/User/settings.json
+if [ ! -f "$settings" ]; then
+  mkdir -p "$(dirname "$settings")"
+  cat >"$settings" <<'JSON'
+` + editorSettings + `JSON
+  chown -R blink:blink /home/blink/.local
 fi
 systemctl enable --now blink-editor
 `
