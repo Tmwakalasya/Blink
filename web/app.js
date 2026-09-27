@@ -1,19 +1,28 @@
-// Blink's page: sign in, pick a size, watch the VM boot, then use its shell.
+// Blink's page: sign in, pick a size, watch the VM boot, then work in it.
 const $ = (id) => document.getElementById(id);
 const STEPS = ['requested', 'creating', 'booting', 'ssh'];
+// What each step says in the boot log, and what the status pill says after it.
+const STEP_LOG = {
+  requested: { key: 'request', after: 'Provisioning' },
+  creating: { key: 'provision', after: 'Booting' },
+  booting: { key: 'boot', after: 'Connecting' },
+  ssh: { key: 'ssh', after: 'Ready' },
+};
 
 const state = {
   status: null, // from /api/status
   view: '',
   size: '', // chosen size id
   ttl: 0, // chosen lifetime, seconds
-  vm: null, // the VM in the shell
+  vm: null, // the VM on screen
   ws: null,
   retries: 0,
   term: null,
   fit: null,
   clock: 0,
   countdown: 0,
+  editorPoll: null,
+  credential: '',
   ending: false,
   expired: false,
   expiredName: '',
@@ -28,10 +37,14 @@ async function init() {
   $('recheck').addEventListener('click', recheck);
   $('signout').addEventListener('click', signOut);
   $('save-roster').addEventListener('click', saveRoster);
-  $('s-copy').addEventListener('click', () => state.vm?.ssh && copy(state.vm.ssh));
+  $('request-btn').addEventListener('click', requestAccess);
+  $('s-copy').addEventListener('click', () => state.vm?.ssh && copy(state.vm.ssh, 'SSH command copied'));
+  $('s-ip').addEventListener('click', () => state.vm?.ip && copy(state.vm.ip, 'IP copied'));
   $('s-end').addEventListener('click', end);
+  $('tab-editor').addEventListener('click', () => selectTab('editor'));
+  $('tab-terminal').addEventListener('click', () => selectTab('terminal'));
   for (const btn of document.querySelectorAll('.command .copy')) {
-    btn.addEventListener('click', () => copy(btn.previousElementSibling.textContent));
+    btn.addEventListener('click', () => copy(btn.previousElementSibling.textContent, 'Copied'));
   }
   let st;
   try {
@@ -47,7 +60,7 @@ async function init() {
   if (st.ready) resume();
 }
 
-// ---------- page state ----------
+// ---------- the create page ----------
 
 function render(st) {
   state.status = st;
@@ -59,7 +72,9 @@ function render(st) {
   if (!link.hidden) link.href = `https://console.cloud.google.com/compute/instances?project=${encodeURIComponent(st.project)}`;
   $('where-line').hidden = !u || !st.project;
   $('where').textContent = st.project ? `${st.project} / ${st.zone}` : '';
+  $('conn').hidden = !u;
   $('dot').classList.toggle('off', !st.ready);
+  $('conn-text').textContent = st.ready ? 'connected' : 'not connected';
   if (!u) return;
 
   const sizes = st.sizes || [];
@@ -78,7 +93,7 @@ function render(st) {
   renderMeters(st);
   renderNotice(st.problem || st.warning, st.problem ? 'Setup needed' : 'Warning', st.fix);
   $('recheck').hidden = st.ready || !u.admin;
-  updateEstimate();
+  updateSummary();
 }
 
 // refresh re-reads the status, e.g. after a VM ends, to update the meters.
@@ -89,31 +104,42 @@ async function refresh() {
 }
 
 function sizeOption(s) {
-  const input = choice('size', s.id, s.id === state.size, () => {
-    state.size = s.id;
-    remember('size', s.id);
-    updateEstimate();
-  });
-  const label = el('label', 'size');
-  label.append(
-    input,
+  const row = el('label', 'size-row');
+  row.append(
+    choice('size', s.id, s.id === state.size, () => {
+      state.size = s.id;
+      remember('size', s.id);
+      updateSummary();
+    }),
+    el('span', 'radio'),
     el('span', 'size-name', s.label),
-    el('span', 'size-machine', s.machine),
-    el('span', 'size-spec', `${s.cpu} · ${s.memory}`),
-    el('span', 'size-price', `${money(s.hourly)} an hour`),
+    specLine(s),
+    el('span', 'size-price', `${money(s.hourly)}/hr`),
   );
-  return label;
+  return row;
+}
+
+function specLine(s) {
+  const spec = el('span', 'size-spec');
+  spec.append(
+    el('span', '', s.machine),
+    el('span', '', `${s.cpu.replace(' vCPUs', ' vCPU')} · ${s.memory}`),
+    el('span', 'tag', s.editor ? 'VS Code + terminal' : 'terminal'),
+  );
+  return spec;
 }
 
 function lifetimeOption(seconds) {
-  const input = choice('ttl', seconds, seconds === state.ttl, () => {
-    state.ttl = seconds;
-    remember('ttl', seconds);
-    updateEstimate();
-  });
-  const label = el('label', 'pill');
-  label.append(input, ttlText(seconds));
-  return label;
+  const seg = el('label', 'seg');
+  seg.append(
+    choice('ttl', seconds, seconds === state.ttl, () => {
+      state.ttl = seconds;
+      remember('ttl', seconds);
+      updateSummary();
+    }),
+    ttlText(seconds),
+  );
+  return seg;
 }
 
 function choice(name, value, checked, onChange) {
@@ -126,7 +152,7 @@ function choice(name, value, checked, onChange) {
   return input;
 }
 
-function updateEstimate() {
+function updateSummary() {
   const st = state.status;
   const size = st.sizes?.find((s) => s.id === state.size);
   if (!size || !state.ttl) {
@@ -135,14 +161,15 @@ function updateEstimate() {
   }
   const hours = state.ttl / 3600;
   const cost = size.hourly * hours;
-  $('estimate').replaceChildren(
-    el('strong', '', `About ${money(cost)}`),
-    ` for ${ttlText(state.ttl)}. ${st.image} in ${st.zone}, ${st.place}.`,
-  );
+  $('sum-machine').textContent = `${size.machine} (${size.label.toLowerCase()})`;
+  $('sum-image').textContent = st.image || '—';
+  $('sum-zone').textContent = st.zone || '—';
+  $('sum-ttl').textContent = ttlText(state.ttl);
+  $('sum-cost').textContent = money(cost);
 
   let limit = '';
   if (st.budget && st.budget.used + cost > st.budget.limit) {
-    limit = `That would go over the ${usd(st.budget.limit)} class budget. Try a smaller size or a shorter lifetime.`;
+    limit = `That would go over the ${usd(st.budget.limit)} budget. Try a smaller size or a shorter lifetime.`;
   } else if (st.week && st.week.used + hours > st.week.limit) {
     limit = `That would go over your ${hoursText(st.week.limit)} this week. Try a shorter lifetime.`;
   } else if (st.maxVMs && st.running >= st.maxVMs) {
@@ -155,9 +182,9 @@ function updateEstimate() {
 
 function renderMeters(st) {
   $('meters').hidden = !(st.budget || st.week || st.signIn);
-  meter('budget', st.budget, (m) => `${usd(m.used)} of ${usd(m.limit)}`);
-  meter('week', st.week, (m) => `${hoursText(m.used)} of ${hoursText(m.limit)}`);
-  meter('vms', st.signIn ? { used: st.running, limit: st.maxVMs } : null, (m) => `${m.used} of ${m.limit}`);
+  meter('budget', st.budget, (m) => `${usd(m.used)} / ${usd(m.limit)}`);
+  meter('week', st.week, (m) => `${hoursText(m.used)} / ${hoursText(m.limit)}`);
+  meter('vms', st.signIn ? { used: st.running, limit: st.maxVMs } : null, (m) => `${m.used} / ${m.limit}`);
 }
 
 function meter(id, m, text) {
@@ -197,7 +224,8 @@ async function resume() {
 
   // The page was reloaded while the server was still starting this VM.
   showProgress(starting.size);
-  $('p-name').textContent = starting.name;
+  setTitle(starting.name);
+  log(0, 'resume', `${starting.name} is still starting`);
   for (let i = 0; i < 120; i++) {
     await wait(2000);
     vms = await listVMs();
@@ -226,18 +254,37 @@ function showSignIn(st) {
   loadScript('https://accounts.google.com/gsi/client')
     .then(() => {
       google.accounts.id.initialize({ client_id: st.signIn.clientId, callback: onCredential, ux_mode: 'popup' });
-      google.accounts.id.renderButton($('gsi'), { theme: 'outline', size: 'large', shape: 'pill', text: 'signin_with' });
+      google.accounts.id.renderButton($('gsi'), { theme: 'outline', size: 'large', shape: 'rectangular', text: 'signin_with' });
     })
     .catch(() => signInError('Couldn’t load Google sign-in. Check your connection and reload.'));
 }
 
 async function onCredential({ credential }) {
+  state.credential = credential;
+  $('signin-error').hidden = $('request').hidden = true;
   try {
     await api('POST', '/api/login', { credential });
     location.reload();
   } catch (e) {
-    signInError(e.message);
+    if (!e.data?.canRequest) return signInError(e.message);
+    $('request-text').textContent = `${e.message} Ask to be let in, then sign in again once you are.`;
+    $('request-btn').hidden = false;
+    $('request').hidden = false;
   }
+}
+
+async function requestAccess() {
+  const btn = $('request-btn');
+  btn.disabled = true;
+  try {
+    const res = await api('POST', '/api/access', { credential: state.credential });
+    if (res?.allowed) return location.reload();
+    $('request-text').textContent = 'Request sent. Sign in again once you’ve been let in.';
+    btn.hidden = true;
+  } catch (e) {
+    $('request-text').textContent = e.message;
+  }
+  btn.disabled = false;
 }
 
 function signInError(message) {
@@ -253,13 +300,14 @@ async function signOut() {
   location.reload();
 }
 
-// ---------- the class, for admins ----------
+// ---------- admins ----------
 
 async function loadClass() {
   $('admin').hidden = false;
   try {
     const data = await api('GET', '/api/class');
     $('roster').value = data.roster || '';
+    renderRequests(data.requests || []);
     renderUsage(data.week || []);
   } catch {}
 }
@@ -269,11 +317,38 @@ async function saveRoster() {
   btn.disabled = true;
   try {
     const { count } = await api('PUT', '/api/class', { roster: $('roster').value });
-    $('roster-status').textContent = `Saved. ${count} ${count === 1 ? 'entry' : 'entries'}.`;
+    $('roster-status').textContent = `Saved · ${count} ${count === 1 ? 'entry' : 'entries'}`;
   } catch (e) {
     $('roster-status').textContent = e.message;
   }
   btn.disabled = false;
+}
+
+function renderRequests(requests) {
+  $('requests').hidden = !requests.length;
+  $('request-list').replaceChildren(
+    ...requests.map((r) => {
+      const approve = el('button', 'btn btn-primary btn-xs', 'Let in');
+      const dismiss = el('button', 'btn btn-secondary btn-xs', 'Dismiss');
+      approve.onclick = () => answer(r.email, true);
+      dismiss.onclick = () => answer(r.email, false);
+      const actions = el('span', 'request-actions');
+      actions.append(approve, dismiss);
+      const li = el('li');
+      li.append(el('span', 'request-email', r.email), el('span', 'request-when', ago(r.at)), actions);
+      return li;
+    }),
+  );
+}
+
+async function answer(email, approve) {
+  try {
+    await api('POST', '/api/class/answer', { email, approve });
+    toast(approve ? `${email} can sign in now` : `Dismissed ${email}`);
+  } catch (e) {
+    toast(e.message);
+  }
+  loadClass();
 }
 
 function renderUsage(week) {
@@ -294,11 +369,20 @@ function row(cells) {
   return tr;
 }
 
-// ---------- starting a VM ----------
+function ago(when) {
+  const minutes = Math.round((Date.now() - Date.parse(when)) / 60000);
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 48 * 60) return `${Math.round(minutes / 60)} h ago`;
+  return `${Math.round(minutes / 1440)} days ago`;
+}
+
+// ---------- creating a VM ----------
 
 async function start() {
   if (!state.size || !state.ttl) return;
   showProgress(state.size);
+  const size = state.status.sizes?.find((s) => s.id === state.size);
+  log(0, 'create', `${size?.machine} · ${ttlText(state.ttl)} · ${state.status.zone}`);
   let res;
   try {
     res = await fetch('/api/vms', {
@@ -329,7 +413,7 @@ async function start() {
     try {
       chunk = await reader.read();
     } catch {
-      if (!finished) fail('Lost the connection to Blink while starting the VM.');
+      if (!finished) fail('Lost the connection to Blink while creating the VM.');
       return;
     }
     if (chunk.done) break;
@@ -347,19 +431,23 @@ async function start() {
 // onEvent applies one step of the stream and reports whether it was the last.
 function onEvent(ev) {
   if (ev.error) {
-    fail(ev.error, ev.fix, ev.step);
+    fail(ev.error, ev.fix, ev.step, ev.at);
     return true;
   }
   if (ev.vm) {
     stopClock(ev.at);
-    setTimeout(() => openShell(ev.vm, ev.at), 400);
+    log(ev.at, 'ready', `${ev.vm.name} · ${ev.vm.ip}`, 'ok');
+    setStatus('Ready', 'done');
+    setTimeout(() => openShell(ev.vm, ev.at), 500);
     return true;
   }
   const li = stepEl(ev.step);
   li.className = 'done';
-  li.querySelector('time').textContent = `${ev.at.toFixed(1)} s`;
-  if (ev.note) li.querySelector('.step-note').textContent = ev.note;
-  if (ev.step === 'requested' && ev.note) $('p-name').textContent = ev.note;
+  li.querySelector('time').textContent = `${ev.at.toFixed(1)}s`;
+  const info = STEP_LOG[ev.step];
+  log(ev.at, info.key, (ev.note || 'done').toLowerCase());
+  if (ev.step === 'requested' && ev.note) setTitle(ev.note);
+  setStatus(info.after);
   const next = STEPS[STEPS.indexOf(ev.step) + 1];
   if (next) stepEl(next).className = 'active';
   return false;
@@ -369,24 +457,44 @@ function showProgress(sizeId) {
   for (const li of document.querySelectorAll('#steps li')) {
     li.className = '';
     li.querySelector('time').textContent = '';
-    li.querySelector('.step-note').textContent = '';
   }
   stepEl('requested').className = 'active';
+  $('log').replaceChildren();
   const size = state.status.sizes?.find((s) => s.id === sizeId);
-  $('p-name').textContent = 'New VM';
+  $('p-name').textContent = 'new vm';
+  $('p-title').textContent = 'Creating VM';
   $('p-size').textContent = size?.label || '—';
   $('p-machine').textContent = size?.machine || '—';
   $('p-ttl').textContent = ttlText(state.ttl);
+  setStatus('Provisioning');
   $('failure').hidden = true;
   show('progress');
   startClock();
 }
 
-function fail(message, fix, step) {
-  stopClock();
+function setTitle(name) {
+  $('p-name').textContent = name;
+  $('p-title').textContent = `Creating ${name}`;
+}
+
+function setStatus(text, kind = '') {
+  $('p-status-text').textContent = text;
+  $('p-status').className = `pill ${kind}`;
+}
+
+function log(at, key, value, kind = '') {
+  const line = el('div', `log-line ${kind}`);
+  line.append(el('span', 't', clockText(at)), el('span', 'k', key), el('span', 'v', value));
+  $('log').append(line);
+}
+
+function fail(message, fix, step, at) {
+  const elapsed = stopClock();
   const li = step ? stepEl(step) : document.querySelector('#steps .active');
   for (const active of document.querySelectorAll('#steps .active')) active.className = '';
   if (li) li.className = 'failed';
+  log(at ?? elapsed, 'error', message, 'err');
+  setStatus('Failed', 'failed');
   $('failure-text').textContent = message;
   setFix($('failure-fix'), $('failure-fix-text'), fix);
   $('failure').hidden = false;
@@ -399,21 +507,24 @@ function backToIdle() {
 }
 
 function startClock() {
-  const began = performance.now();
+  state.clockStart = performance.now();
   cancelAnimationFrame(state.clock);
   const tick = () => {
-    $('clock').textContent = ((performance.now() - began) / 1000).toFixed(1);
+    $('clock').textContent = `${((performance.now() - state.clockStart) / 1000).toFixed(1)}s`;
     state.clock = requestAnimationFrame(tick);
   };
   tick();
 }
 
+// stopClock freezes the timer at at (or now) and returns the elapsed seconds.
 function stopClock(at) {
   cancelAnimationFrame(state.clock);
-  if (at != null) $('clock').textContent = at.toFixed(1);
+  const elapsed = at ?? (performance.now() - (state.clockStart || performance.now())) / 1000;
+  $('clock').textContent = `${elapsed.toFixed(1)}s`;
+  return elapsed;
 }
 
-// ---------- the shell ----------
+// ---------- the VM ----------
 
 async function openShell(vm, readyIn) {
   state.vm = vm;
@@ -424,15 +535,73 @@ async function openShell(vm, readyIn) {
   $('s-name').textContent = vm.name;
   $('s-size').textContent = size ? `${size.label} · ${size.machine}` : '—';
   $('s-ip').textContent = vm.ip || '—';
-  $('s-ready').textContent = readyIn != null ? `${readyIn.toFixed(1)} s` : '—';
+  $('s-ready').textContent = readyIn != null ? `${readyIn.toFixed(1)}s` : '—';
   $('s-copy').hidden = !vm.ssh;
   $('s-end').hidden = false;
   resetEnd();
   $('curtain').hidden = true;
+  $('tabs').hidden = !vm.editor;
   show('shell');
+  selectTab('terminal'); // xterm has to be visible when it first opens
   await ensureTerminal();
   startCountdown(vm.expiresAt);
   connect();
+  if (vm.editor) {
+    startEditor(vm);
+    selectTab('editor');
+  }
+}
+
+function editorURL(vm) {
+  return `/editor/${vm.zone}/${vm.name}/`;
+}
+
+// startEditor waits for VS Code to start on the VM, then shows it.
+async function startEditor(vm) {
+  stopEditor();
+  const frame = $('editor-frame');
+  $('editor-wait').hidden = false;
+  $('s-open').href = editorURL(vm);
+  const began = Date.now();
+  const poll = (state.editorPoll = {});
+  while (state.editorPoll === poll && state.vm === vm) {
+    try {
+      const res = await fetch(`${editorURL(vm)}healthz`, { cache: 'no-store' });
+      if (res.ok) break;
+    } catch {}
+    const waited = Math.round((Date.now() - began) / 1000);
+    $('editor-wait-time').textContent = `${Math.floor(waited / 60)}:${String(waited % 60).padStart(2, '0')}`;
+    if (waited > 600) {
+      $('editor-wait-time').textContent = 'VS Code didn’t start. The terminal still works.';
+      return;
+    }
+    await wait(waited < 60 ? 1000 : 3000); // quick at first: with the pre-built image it takes seconds
+  }
+  if (state.editorPoll !== poll || state.vm !== vm) return;
+  frame.src = editorURL(vm);
+  frame.hidden = false;
+  $('editor-wait').hidden = true;
+  $('s-open').hidden = false;
+}
+
+function stopEditor() {
+  state.editorPoll = null;
+  const frame = $('editor-frame');
+  frame.hidden = true;
+  frame.removeAttribute('src');
+  $('s-open').hidden = true;
+  $('editor-wait-time').textContent = '';
+}
+
+function selectTab(tab) {
+  $('tab-editor').setAttribute('aria-selected', String(tab === 'editor'));
+  $('tab-terminal').setAttribute('aria-selected', String(tab === 'terminal'));
+  $('editor').hidden = tab !== 'editor';
+  $('term').hidden = tab !== 'terminal';
+  if (tab === 'terminal' && state.term) {
+    state.fit.fit();
+    state.term.focus();
+  }
 }
 
 async function ensureTerminal() {
@@ -442,13 +611,13 @@ async function ensureTerminal() {
   }
   // xterm measures the font once, so it has to be loaded first.
   try {
-    await document.fonts.load('400 14px "Geist Mono"');
+    await document.fonts.load('400 13px "Geist Mono"');
   } catch {}
   const term = new Terminal({
     cursorBlink: true,
     fontFamily: '"Geist Mono", ui-monospace, Menlo, monospace',
-    fontSize: 14,
-    lineHeight: 1.2,
+    fontSize: 13,
+    lineHeight: 1.25,
     scrollback: 5000,
     theme: {
       background: '#131715', foreground: '#ecebe4', cursor: '#bc4228', cursorAccent: '#131715',
@@ -485,7 +654,7 @@ function connect() {
   ws.onopen = () => {
     $('curtain').hidden = true;
     send({ type: 'resize', cols: term.cols, rows: term.rows });
-    term.focus();
+    if (!$('term').hidden) term.focus();
   };
   ws.onmessage = (e) => {
     state.retries = 0;
@@ -510,6 +679,7 @@ function connect() {
 
 function reconnect() {
   state.retries = 0;
+  selectTab('terminal');
   connect();
 }
 
@@ -522,17 +692,17 @@ function startCountdown(expiresAt) {
   const end = expiresAt ? Date.parse(expiresAt) : Date.now() + state.ttl * 1000;
   const tick = () => {
     const left = Math.ceil((end - Date.now()) / 1000);
-    const el = $('s-left');
+    const cell = $('s-left');
     if (left <= 0) {
-      el.textContent = '0:00';
+      cell.textContent = '0:00';
       clearInterval(state.countdown);
       return expire();
     }
     const h = Math.floor(left / 3600);
     const m = Math.floor((left % 3600) / 60);
     const s = String(left % 60).padStart(2, '0');
-    el.textContent = h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
-    el.classList.toggle('soon', left <= 60);
+    cell.textContent = h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+    cell.classList.toggle('soon', left <= 60);
   };
   tick();
   state.countdown = setInterval(tick, 1000);
@@ -542,11 +712,11 @@ function expire() {
   state.expired = true;
   state.expiredName = state.vm.name;
   state.ws?.close();
+  stopEditor();
+  selectTab('terminal');
   $('s-copy').hidden = true;
   $('s-end').hidden = true;
-  curtain(`${state.vm.name} reached the end of its lifetime and was deleted.`, 'Start another VM', () => {
-    backToIdle();
-  });
+  curtain(`${state.vm.name} reached the end of its lifetime and was deleted.`, 'Create another VM', backToIdle);
 }
 
 let confirmTimer = 0;
@@ -580,7 +750,7 @@ function resetEnd() {
   clearTimeout(confirmTimer);
   const btn = $('s-end');
   btn.classList.remove('confirm');
-  btn.textContent = 'Delete VM';
+  btn.textContent = 'Delete';
 }
 
 function curtain(text, label, action) {
@@ -595,7 +765,6 @@ function curtain(text, label, action) {
 
 function show(view) {
   $('home').hidden = view === 'shell';
-  $('home').classList.toggle('compact', view === 'progress');
   $('signin').hidden = view !== 'signin';
   $('idle').hidden = view !== 'idle';
   $('progress').hidden = view !== 'progress';
@@ -603,10 +772,11 @@ function show(view) {
   document.body.classList.toggle('in-shell', view === 'shell');
   if (view !== 'shell') {
     clearInterval(state.countdown);
+    stopEditor();
     state.vm = null;
   }
   if (view !== state.view) {
-    const target = view === 'shell' ? $('shell') : state.view === 'shell' ? $('home') : $(view);
+    const target = view === 'shell' ? $('shell') : $(view);
     target.classList.remove('enter');
     void target.offsetWidth; // restart the animation
     target.classList.add('enter');
@@ -638,6 +808,11 @@ function setFix(box, code, fix) {
   } else {
     code.textContent = fix;
   }
+}
+
+function clockText(seconds) {
+  const m = Math.floor(seconds / 60);
+  return `${String(m).padStart(2, '0')}:${(seconds - m * 60).toFixed(1).padStart(4, '0')}`;
 }
 
 function ttlText(seconds) {
@@ -695,14 +870,18 @@ async function api(method, path, body) {
     data = text ? JSON.parse(text) : null;
   } catch {}
   if (res.status === 401 && state.status?.signIn && path !== '/api/login') location.reload();
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data?.error || `HTTP ${res.status}`);
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 
-async function copy(text) {
+async function copy(text, message) {
   try {
     await navigator.clipboard.writeText(text);
-    toast('Copied');
+    toast(message);
   } catch {
     toast('The browser blocked the clipboard.');
   }

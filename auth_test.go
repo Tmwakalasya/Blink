@@ -142,6 +142,7 @@ func TestLimitsStopNewVMs(t *testing.T) {
 		fc := newFakeCloud("127.0.0.1")
 		fc.put(machine{Name: "blink-ana001", Zone: "us-central1-a", Status: "RUNNING", Owner: student.owner, blink: true})
 		s := testServer(t, fc, "22")
+		s.ledger.add(usage{VM: "blink-ana001", Zone: "us-central1-a", Owner: student.owner, Hourly: small.Hourly, Start: now, TTL: 1800})
 		_, no := s.admitStart(ctx, fc, student, small, 30*time.Minute)
 		if no == nil || no.code != http.StatusConflict || no.VM == nil {
 			t.Fatalf("second VM for one student: %+v", no)
@@ -190,4 +191,46 @@ func TestLimitsStopNewVMs(t *testing.T) {
 			t.Errorf("admins shouldn't have an hour limit: %s", no.Error)
 		}
 	})
+}
+
+func TestRequestingAccess(t *testing.T) {
+	s := classServer(t, testConfig(t), newFakeCloud("127.0.0.1"), "22", studentEmail)
+	h := s.routes()
+	stranger := "newcomer@school.edu"
+
+	rec := request(h, "POST", "/api/login", `{"credential":"`+stranger+`"}`, nil)
+	var refused apiError
+	json.Unmarshal(rec.Body.Bytes(), &refused)
+	if rec.Code != http.StatusForbidden || !refused.CanRequest {
+		t.Fatalf("login off the list: %d %+v, want 403 offering a request", rec.Code, refused)
+	}
+	if rec := request(h, "POST", "/api/access", `{"credential":"`+stranger+`"}`, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("asking for access: %d %s", rec.Code, rec.Body)
+	}
+	request(h, "POST", "/api/access", `{"credential":"`+stranger+`"}`, nil) // asking twice is fine
+	request(h, "POST", "/api/access", `{"credential":"pest@else.com"}`, nil)
+
+	admin := signIn(t, h, adminEmail)
+	var class struct{ Requests []accessRequest }
+	json.Unmarshal(request(h, "GET", "/api/class", "", admin).Body.Bytes(), &class)
+	if len(class.Requests) != 2 {
+		t.Fatalf("requests = %+v, want the newcomer and the pest once each", class.Requests)
+	}
+	if rec := request(h, "POST", "/api/class/answer", `{"email":"`+stranger+`","approve":true}`, signIn(t, h, studentEmail)); rec.Code != http.StatusForbidden {
+		t.Errorf("a student answered a request: %d", rec.Code)
+	}
+	request(h, "POST", "/api/class/answer", `{"email":"`+stranger+`","approve":true}`, admin)
+	request(h, "POST", "/api/class/answer", `{"email":"pest@else.com","approve":false}`, admin)
+
+	signIn(t, h, stranger) // approved, so this works
+	if rec := request(h, "POST", "/api/login", `{"credential":"pest@else.com"}`, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("a dismissed request got in: %d", rec.Code)
+	}
+	json.Unmarshal(request(h, "GET", "/api/class", "", admin).Body.Bytes(), &class)
+	if len(class.Requests) != 0 {
+		t.Errorf("answered requests are still waiting: %+v", class.Requests)
+	}
+	if !strings.Contains(s.auth.roster(), studentEmail) {
+		t.Error("approving someone dropped an existing entry from the list")
+	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -108,17 +109,21 @@ func (s *server) admitStart(ctx context.Context, c cloud, u user, sz size, ttl t
 	if s.starting[u.owner] {
 		return spec{}, no(http.StatusConflict, "Your VM is already starting.")
 	}
-	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	ms, err := c.List(lctx)
-	cancel()
-	if err != nil {
-		problem, fix := s.explain(err)
-		return spec{}, &refusal{code: http.StatusBadGateway, apiError: apiError{Error: problem, Fix: fix}}
-	}
-	for _, m := range ms {
-		if m.alive() && m.Owner == u.owner {
+	// The ledger knows which VM this person may still have; checking just that
+	// one is much quicker than listing every VM in the project.
+	if prev, ok := s.ledger.activeFor(u.owner, time.Now()); ok {
+		gctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		m, err := c.Get(gctx, cmp.Or(prev.Zone, s.cfg.Zone), prev.VM)
+		cancel()
+		switch {
+		case err == nil && m.alive():
 			s.decorate(&m, u)
 			return spec{}, &refusal{code: http.StatusConflict, apiError: apiError{Error: m.Name + " is still running.", VM: &m}}
+		case err == nil || errors.Is(err, errNotFound):
+			s.ledger.end(prev.VM, time.Now()) // gone early, e.g. deleted in the console
+		default:
+			problem, fix := s.explain(err)
+			return spec{}, &refusal{code: http.StatusBadGateway, apiError: apiError{Error: problem, Fix: fix}}
 		}
 	}
 
@@ -144,9 +149,10 @@ func (s *server) admitStart(ctx context.Context, c cloud, u user, sz size, ttl t
 		Network: s.cfg.Network,
 		TTL:     ttl,
 		Owner:   u.owner,
+		Editor:  sz.Editor,
 	}
-	err = s.ledger.add(usage{
-		VM: sp.Name, Owner: u.owner, Email: u.Email, Size: sz.ID, Hourly: sz.Hourly,
+	err := s.ledger.add(usage{
+		VM: sp.Name, Zone: sp.Zone, Owner: u.owner, Email: u.Email, Size: sz.ID, Hourly: sz.Hourly,
 		Start: now, TTL: int64(ttl / time.Second),
 	})
 	if err != nil {
@@ -273,7 +279,7 @@ func (s *server) untilRunning(ctx context.Context, c cloud, wait func(context.Co
 func (s *server) untilListening(ctx context.Context, addr string) error {
 	var d net.Dialer
 	for {
-		dctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		dctx, cancel := context.WithTimeout(ctx, time.Second)
 		conn, err := d.DialContext(dctx, "tcp", addr)
 		cancel()
 		if err == nil {

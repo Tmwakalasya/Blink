@@ -1,0 +1,18 @@
+# VS Code in the browser (code-server) for Blink. It listens on localhost only;
+# Blink reaches it through SSH. It starts at boot on VMs whose metadata has
+# blink-editor set, so Small VMs built from the same image skip it.
+[Unit]
+Description=VS Code in the browser, for Blink
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=blink
+WorkingDirectory=/home/blink
+Environment=HOME=/home/blink
+ExecCondition=/usr/bin/curl -sf -o /dev/null --retry 5 --retry-connrefused -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/blink-editor
+ExecStart=/usr/bin/code-server --bind-addr 127.0.0.1:8080 --auth none --disable-telemetry --disable-update-check --disable-workspace-trust /home/blink
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

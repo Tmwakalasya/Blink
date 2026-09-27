@@ -25,6 +25,11 @@ const (
 	blinkLabel = "blink"
 	sshUser    = "blink"
 	diskGB     = 10
+
+	defaultImage = "projects/debian-cloud/global/images/family/debian-12"
+	// imageFamily is the pre-built image deploy/build-image.sh makes: Debian 12
+	// with VS Code and dev tools installed, so VMs are ready in seconds.
+	imageFamily = "blink"
 )
 
 var errNotFound = errors.New("not found")
@@ -43,6 +48,7 @@ type machine struct {
 	Ready  bool   `json:"ready"`           // running, with a verified host key
 	SSH    string `json:"ssh,omitempty"`   // how to connect from your own terminal
 	Email  string `json:"email,omitempty"` // whose it is, for admins
+	Editor bool   `json:"editor"`          // VS Code in the browser is installed
 
 	Owner string `json:"-"` // label value naming who started it
 	blink bool
@@ -61,6 +67,7 @@ type spec struct {
 	Name, Zone, Machine, Image, Network string
 	Size                                string // menu entry, e.g. small
 	Owner                               string // label value from ownerID
+	Editor                              bool   // install VS Code in the browser at boot
 	TTL                                 time.Duration
 	PublicKey                           string // authorized_keys format
 }
@@ -81,6 +88,7 @@ type cloud interface {
 
 type gce struct {
 	project   string
+	images    *compute.ImagesClient
 	instances *compute.InstancesClient
 	networks  *compute.NetworksClient
 	firewalls *compute.FirewallsClient
@@ -102,10 +110,18 @@ func newGCE(ctx context.Context, project string) (*gce, error) {
 		networks.Close()
 		return nil, err
 	}
-	return &gce{project: project, instances: instances, networks: networks, firewalls: firewalls}, nil
+	images, err := compute.NewImagesRESTClient(ctx)
+	if err != nil {
+		instances.Close()
+		networks.Close()
+		firewalls.Close()
+		return nil, err
+	}
+	return &gce{project: project, images: images, instances: instances, networks: networks, firewalls: firewalls}, nil
 }
 
 func (g *gce) Close() {
+	g.images.Close()
 	g.instances.Close()
 	g.networks.Close()
 	g.firewalls.Close()
@@ -115,7 +131,7 @@ func (g *gce) Close() {
 // most: Google itself deletes the VM when the TTL runs out, even if Blink has
 // crashed or your laptop is shut.
 func newInstance(s spec) *computepb.Instance {
-	return &computepb.Instance{
+	inst := &computepb.Instance{
 		Name:        proto.String(s.Name),
 		MachineType: proto.String(fmt.Sprintf("zones/%s/machineTypes/%s", s.Zone, s.Machine)),
 		Labels:      map[string]string{blinkLabel: "true", "blink-owner": s.Owner, "blink-size": s.Size},
@@ -126,7 +142,7 @@ func newInstance(s spec) *computepb.Instance {
 			InitializeParams: &computepb.AttachedDiskInitializeParams{
 				SourceImage: proto.String(s.Image),
 				DiskSizeGb:  proto.Int64(diskGB),
-				DiskType:    proto.String(fmt.Sprintf("zones/%s/diskTypes/pd-standard", s.Zone)),
+				DiskType:    proto.String(fmt.Sprintf("zones/%s/diskTypes/pd-balanced", s.Zone)), // pd-standard is far too slow to boot from
 			},
 		}},
 		NetworkInterfaces: []*computepb.NetworkInterface{{
@@ -150,6 +166,12 @@ func newInstance(s spec) *computepb.Instance {
 			InstanceTerminationAction: proto.String(computepb.Scheduling_DELETE.String()),
 		},
 	}
+	if s.Editor {
+		inst.Metadata.Items = append(inst.Metadata.Items,
+			&computepb.Items{Key: proto.String("blink-editor"), Value: proto.String("TRUE")},
+			&computepb.Items{Key: proto.String("startup-script"), Value: proto.String(editorScript)})
+	}
+	return inst
 }
 
 func (g *gce) Insert(ctx context.Context, s spec) (func(context.Context) error, error) {
@@ -161,11 +183,11 @@ func (g *gce) Insert(ctx context.Context, s spec) (func(context.Context) error, 
 	if err != nil {
 		return nil, err
 	}
-	// Poll every second instead of using op.Wait, whose backoff can oversleep
-	// by several seconds, which would defeat the point of Blink.
+	// Poll twice a second instead of using op.Wait, whose backoff can
+	// oversleep by several seconds, which would defeat the point of Blink.
 	return func(ctx context.Context) error {
 		for !op.Done() {
-			if err := sleep(ctx, time.Second); err != nil {
+			if err := sleep(ctx, 500*time.Millisecond); err != nil {
 				return err
 			}
 			if err := op.Poll(ctx); err != nil {
@@ -242,6 +264,15 @@ func (g *gce) Delete(ctx context.Context, zone, name string) error {
 		return nil
 	}
 	return err
+}
+
+// prebuilt returns the pre-built image's path if the project has one.
+func (g *gce) prebuilt(ctx context.Context) (string, bool) {
+	_, err := g.images.GetFromFamily(ctx, &computepb.GetFromFamilyImageRequest{Project: g.project, Family: imageFamily})
+	if err != nil {
+		return "", false
+	}
+	return "projects/" + g.project + "/global/images/family/" + imageFamily, true
 }
 
 func (g *gce) networkExists(ctx context.Context, network string) error {
@@ -354,6 +385,7 @@ var places = map[string]string{
 }
 
 var imageNames = map[string]string{
+	imageFamily: "Debian 12 + dev tools",
 	"debian-11": "Debian 11", "debian-12": "Debian 12", "debian-13": "Debian 13",
 	"ubuntu-2204-lts": "Ubuntu 22.04", "ubuntu-2404-lts-amd64": "Ubuntu 24.04",
 	"rocky-linux-9": "Rocky Linux 9",

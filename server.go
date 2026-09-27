@@ -26,15 +26,17 @@ import (
 var webFS embed.FS
 
 type server struct {
-	cfg       config
-	keys      keyStore
-	sizes     []size
-	lifetimes []time.Duration
-	auth      *auth // nil when Blink is a single-user tool on localhost
-	ledger    *ledger
-	shells    *shells
-	sshPort   string // 22, except in tests
-	timing    timing
+	cfg        config
+	keys       keyStore
+	sizes      []size
+	lifetimes  []time.Duration
+	auth       *auth // nil when Blink is a single-user tool on localhost
+	ledger     *ledger
+	shells     *shells
+	tunnels    *tunnels
+	sshPort    string // 22, except in tests
+	editorAddr string // where VS Code listens on the VM
+	timing     timing
 
 	mu     sync.Mutex
 	cloud  cloud // nil until Blink can reach Google Cloud
@@ -67,9 +69,10 @@ type status struct {
 }
 
 type apiError struct {
-	Error string   `json:"error"`
-	Fix   string   `json:"fix,omitempty"`
-	VM    *machine `json:"vm,omitempty"`
+	Error      string   `json:"error"`
+	Fix        string   `json:"fix,omitempty"`
+	VM         *machine `json:"vm,omitempty"`
+	CanRequest bool     `json:"canRequest,omitempty"` // may ask to be let in
 }
 
 func newServer(cfg config) (*server, error) {
@@ -89,16 +92,18 @@ func newServer(cfg config) (*server, error) {
 		return nil, err
 	}
 	s := &server{
-		cfg:       cfg,
-		keys:      keyStore{dir: filepath.Join(cfg.State, "vms")},
-		sizes:     sizes,
-		lifetimes: lts,
-		ledger:    l,
-		shells:    &shells{byVM: map[string]*shell{}},
-		sshPort:   "22",
-		starting:  map[string]bool{},
+		cfg:        cfg,
+		keys:       keyStore{dir: filepath.Join(cfg.State, "vms")},
+		sizes:      sizes,
+		lifetimes:  lts,
+		ledger:     l,
+		shells:     &shells{byVM: map[string]*shell{}},
+		tunnels:    &tunnels{byVM: map[string]*tunnel{}},
+		sshPort:    "22",
+		editorAddr: "127.0.0.1:8080",
+		starting:   map[string]bool{},
 		timing: timing{
-			poll:         time.Second,
+			poll:         500 * time.Millisecond,
 			hostKeyGrace: 45 * time.Second,
 			keyChurn:     20 * time.Second,
 			shellIdle:    10 * time.Minute,
@@ -123,12 +128,17 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/status", s.admin(s.handleRecheck))
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
+	mux.HandleFunc("POST /api/access", s.handleAccessRequest)
 	mux.HandleFunc("GET /api/vms", s.signedIn(s.handleList))
 	mux.HandleFunc("POST /api/vms", s.signedIn(s.handleSummon))
 	mux.HandleFunc("DELETE /api/vms/{zone}/{name}", s.signedIn(s.handleDelete))
 	mux.HandleFunc("GET /api/vms/{zone}/{name}/terminal", s.signedIn(s.handleTerminal))
+	for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
+		mux.HandleFunc(method+" /editor/{zone}/{name}/", s.signedIn(s.handleEditor))
+	}
 	mux.HandleFunc("GET /api/class", s.admin(s.handleClass))
 	mux.HandleFunc("PUT /api/class", s.admin(s.handleSaveClass))
+	mux.HandleFunc("POST /api/class/answer", s.admin(s.handleAnswer))
 	h := http.NewCrossOriginProtection().Handler(mux)
 	if s.auth == nil {
 		h = localOnly(h) // no sign-in, so nothing but this machine may reach it
@@ -199,6 +209,13 @@ func (s *server) preflight(ctx context.Context) status {
 		st.Warning = fmt.Sprintf("No firewall rule lets SSH into the %q network, so VMs will boot but you won't be able to connect.", s.cfg.Network)
 		st.Fix = s.firewallFix()
 	}
+	// Use the pre-built image when there is one and no other image was asked for.
+	if s.currentCloud() == nil && s.cfg.Image == defaultImage {
+		if image, ok := g.prebuilt(ctx); ok {
+			s.cfg.Image = image
+			st.Image = imageName(image)
+		}
+	}
 	st.Ready = true
 	s.mu.Lock()
 	s.cloud = g
@@ -258,6 +275,8 @@ func (s *server) admin(h func(http.ResponseWriter, *http.Request, user)) http.Ha
 // decorate fills in what only this server knows about m: whether it holds
 // the VM's key and has verified its host key, and, for admins, whose it is.
 func (s *server) decorate(m *machine, u user) {
+	sz, _ := sizeByID(m.Size)
+	m.Editor = sz.Editor
 	m.HasKey = s.keys.has(m.Name)
 	m.Ready = m.Status == "RUNNING" && m.IP != "" && m.HasKey && s.keys.pinned(m.Name)
 	if m.Ready && s.auth == nil {
@@ -355,31 +374,57 @@ func (s *server) handleRecheck(w http.ResponseWriter, r *http.Request, u user) {
 }
 
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	email, ok := s.googleEmail(w, r)
+	if !ok {
+		return
+	}
+	if !s.auth.allowed(email) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: email + " isn't on the list yet.", CanRequest: true})
+		return
+	}
+	s.auth.signIn(w, r, email)
+	writeJSON(w, http.StatusOK, s.auth.userFor(email))
+}
+
+// handleAccessRequest records that someone off the list wants in.
+func (s *server) handleAccessRequest(w http.ResponseWriter, r *http.Request) {
+	email, ok := s.googleEmail(w, r)
+	if !ok {
+		return
+	}
+	if s.auth.allowed(email) {
+		writeJSON(w, http.StatusOK, map[string]bool{"allowed": true})
+		return
+	}
+	if err := s.auth.ask(email); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"requested": true})
+}
+
+// googleEmail reads a Google sign-in token from the request body and returns
+// its verified email, or writes the error and reports false.
+func (s *server) googleEmail(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if s.auth == nil {
 		writeJSON(w, http.StatusNotFound, apiError{Error: "Sign-in isn't turned on."})
-		return
+		return "", false
 	}
 	var body struct {
 		Credential string `json:"credential"`
 	}
 	if json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&body) != nil || body.Credential == "" {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "Google didn't send a sign-in token."})
-		return
+		return "", false
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	email, err := s.auth.verify(ctx, body.Credential)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, apiError{Error: "Google sign-in didn't go through. Try again."})
-		return
+		return "", false
 	}
-	email = strings.ToLower(strings.TrimSpace(email)) // one person, one owner, whatever the case
-	if !s.auth.allowed(email) {
-		writeJSON(w, http.StatusForbidden, apiError{Error: email + " isn't on the class list. Ask whoever runs this Blink to add it."})
-		return
-	}
-	s.auth.signIn(w, r, email)
-	writeJSON(w, http.StatusOK, s.auth.userFor(email))
+	return strings.ToLower(strings.TrimSpace(email)), true // one person, one owner, whatever the case
 }
 
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -430,41 +475,63 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request, u user) {
 	}
 	s.ledger.end(name, time.Now())
 	s.shells.end(name)
+	s.tunnels.end(name)
 	s.keys.remove(name)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleClass shows admins the class list and this week's usage.
+// handleClass shows admins who can sign in, requests to, and this week's usage.
 func (s *server) handleClass(w http.ResponseWriter, r *http.Request, u user) {
 	resp := struct {
-		SignIn bool     `json:"signIn"`
-		Roster string   `json:"roster"`
-		Week   []person `json:"week"`
-	}{Week: s.ledger.week(time.Now())}
+		SignIn   bool            `json:"signIn"`
+		Roster   string          `json:"roster"`
+		Requests []accessRequest `json:"requests"`
+		Week     []person        `json:"week"`
+	}{Week: s.ledger.week(time.Now()), Requests: []accessRequest{}}
 	if s.auth != nil {
 		resp.SignIn, resp.Roster = true, s.auth.roster()
+		if rs := s.auth.requests(); rs != nil {
+			resp.Requests = rs
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *server) handleSaveClass(w http.ResponseWriter, r *http.Request, u user) {
 	if s.auth == nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "Sign-in is off, so there's no class list."})
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "Sign-in is off, so there's no list of people."})
 		return
 	}
 	var body struct {
 		Roster string `json:"roster"`
 	}
 	if json.NewDecoder(io.LimitReader(r.Body, rosterLimit)).Decode(&body) != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "Couldn't read the class list."})
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "Couldn't read the list."})
 		return
 	}
-	n, err := s.auth.saveRoster(body.Roster)
+	n, err := s.auth.replaceRoster(body.Roster)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"count": n})
+}
+
+// handleAnswer approves or dismisses a request to be let in.
+func (s *server) handleAnswer(w http.ResponseWriter, r *http.Request, u user) {
+	var body struct {
+		Email   string `json:"email"`
+		Approve bool   `json:"approve"`
+	}
+	if s.auth == nil || json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body) != nil || body.Email == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "Couldn't read the answer."})
+		return
+	}
+	if err := s.auth.answer(strings.ToLower(body.Email), body.Approve); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // explain turns an error into a sentence and, when there is one, the fix.

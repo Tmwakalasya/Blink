@@ -13,14 +13,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/api/idtoken"
 )
 
 // Sign-in is on when Blink has a Google OAuth client ID. People sign in with
-// Google, and only emails on the class list (or admins) get in. Without a
+// Google, and only emails on the list (or admins) get in. Without a
 // client ID Blink is a single-user tool on localhost, and that user is the
 // admin.
 
@@ -46,6 +48,7 @@ const (
 )
 
 type auth struct {
+	mu       sync.Mutex // guards the files below while they're rewritten
 	clientID string
 	admins   map[string]bool
 	dir      string // holds roster.txt and session.key
@@ -88,14 +91,14 @@ func newAuth(clientID, admins, dir string) (*auth, error) {
 
 func (a *auth) rosterPath() string { return filepath.Join(a.dir, "roster.txt") }
 
-// roster returns the class list as the admin wrote it.
+// roster returns the list of people who can sign in, as the admin wrote it.
 func (a *auth) roster() string {
 	b, _ := os.ReadFile(a.rosterPath())
 	return string(b)
 }
 
 // allowed reports whether email may sign in: admins always, others if the
-// class list names them or their domain (a line like @school.edu).
+// list names them or their domain (a line like @school.edu).
 func (a *auth) allowed(email string) bool {
 	email = strings.ToLower(email)
 	if a.admins[email] {
@@ -135,7 +138,7 @@ func (a *auth) signOut(w http.ResponseWriter, r *http.Request) {
 }
 
 // session returns the signed-in user, who must still be allowed in, so
-// removing someone from the class list signs them out.
+// removing someone from the list signs them out.
 func (a *auth) session(r *http.Request) (user, bool) {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
@@ -166,7 +169,7 @@ func (a *auth) sign(payload []byte) []byte {
 	return m.Sum(nil)
 }
 
-// saveRoster replaces the class list, keeping one entry per line.
+// saveRoster replaces the list, keeping one entry per line.
 func (a *auth) saveRoster(text string) (int, error) {
 	var lines []string
 	for _, line := range strings.Split(text, "\n") {
@@ -184,6 +187,69 @@ func (a *auth) saveRoster(text string) (int, error) {
 		buf.WriteString(line + "\n")
 	}
 	return len(lines), os.WriteFile(a.rosterPath(), buf.Bytes(), 0o600)
+}
+
+// replaceRoster saves text as the list of people who can sign in.
+func (a *auth) replaceRoster(text string) (int, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.saveRoster(text)
+}
+
+// accessRequest is someone asking to be let in.
+type accessRequest struct {
+	Email string    `json:"email"`
+	At    time.Time `json:"at"`
+}
+
+const maxRequests = 200
+
+func (a *auth) requestsPath() string { return filepath.Join(a.dir, "requests.json") }
+
+func (a *auth) requests() []accessRequest {
+	var rs []accessRequest
+	if b, err := os.ReadFile(a.requestsPath()); err == nil {
+		json.Unmarshal(b, &rs)
+	}
+	return rs
+}
+
+func (a *auth) saveRequests(rs []accessRequest) error {
+	b, err := json.Marshal(rs)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(a.requestsPath(), b, 0o600)
+}
+
+// ask records that email wants in. Asking twice is harmless.
+func (a *auth) ask(email string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	rs := a.requests()
+	if slices.ContainsFunc(rs, func(r accessRequest) bool { return r.Email == email }) {
+		return nil
+	}
+	if len(rs) >= maxRequests {
+		return errors.New("Too many requests are waiting. Try again later.")
+	}
+	return a.saveRequests(append(rs, accessRequest{Email: email, At: time.Now()}))
+}
+
+// answer clears email's request, adding them to the list if approved.
+func (a *auth) answer(email string, approve bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if approve && !a.allowed(email) {
+		roster := strings.TrimRight(a.roster(), "\n")
+		if roster != "" {
+			roster += "\n"
+		}
+		if _, err := a.saveRoster(roster + email); err != nil {
+			return err
+		}
+	}
+	return a.saveRequests(slices.DeleteFunc(a.requests(), func(r accessRequest) bool { return r.Email == email }))
 }
 
 func isHTTPS(r *http.Request) bool {

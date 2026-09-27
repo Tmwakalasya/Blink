@@ -17,6 +17,7 @@ import (
 // usage is one VM's line in the ledger.
 type usage struct {
 	VM     string    `json:"vm"`
+	Zone   string    `json:"zone,omitempty"`
 	Owner  string    `json:"owner"`
 	Email  string    `json:"email,omitempty"`
 	Size   string    `json:"size"`
@@ -169,6 +170,19 @@ func (l *ledger) week(now time.Time) []person {
 	}
 	sort.Slice(people, func(i, j int) bool { return people[i].Hours > people[j].Hours })
 	return people
+}
+
+// activeFor returns the newest VM of owner's that may still be running.
+func (l *ledger) activeFor(owner string, now time.Time) (usage, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var found usage
+	for _, u := range l.rows {
+		if u.Owner == owner && u.active(now) && u.Start.After(found.Start) {
+			found = u
+		}
+	}
+	return found, found.VM != ""
 }
 
 func (l *ledger) email(vm string) string {

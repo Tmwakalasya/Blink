@@ -71,8 +71,8 @@ func (s *server) handleTerminal(w http.ResponseWriter, r *http.Request, u user) 
 	}
 }
 
-// openShell connects to the VM and starts a shell on a PTY of the given size.
-func (s *server) openShell(ctx context.Context, m machine, cols, rows int) (*shell, error) {
+// dialVM opens an SSH connection to the VM with its key and pinned host key.
+func (s *server) dialVM(ctx context.Context, m machine) (*ssh.Client, error) {
 	signer, err := s.keys.signer(m.Name)
 	if err != nil {
 		return nil, errors.New("Blink doesn't have the key for " + m.Name + ".")
@@ -88,6 +88,15 @@ func (s *server) openShell(ctx context.Context, m machine, cols, rows int) (*she
 	})
 	if err != nil {
 		return nil, errors.New("Couldn't reach " + m.Name + " over SSH.")
+	}
+	return client, nil
+}
+
+// openShell connects to the VM and starts a shell on a PTY of the given size.
+func (s *server) openShell(ctx context.Context, m machine, cols, rows int) (*shell, error) {
+	client, err := s.dialVM(ctx, m)
+	if err != nil {
+		return nil, err
 	}
 	sess, err := client.NewSession()
 	if err == nil {

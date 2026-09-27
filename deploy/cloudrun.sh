@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploys Blink to Cloud Run for a class. Run it from anywhere in the repo:
+# Deploys Blink to Cloud Run so other people can use it. Run it from anywhere in the repo:
 #
 #   CLIENT_ID=123-abc.apps.googleusercontent.com ADMINS=you@example.com deploy/cloudrun.sh
 #
@@ -18,7 +18,7 @@ MAX_VMS=${MAX_VMS:-10}
 SIZES=${SIZES:-small,medium,large}
 MAX_TTL=${MAX_TTL:-2h}
 : "${CLIENT_ID:?set CLIENT_ID to your Google OAuth client ID}"
-: "${ADMINS:?set ADMINS to the emails that manage the class list}"
+: "${ADMINS:?set ADMINS to the emails that manage who can sign in}"
 SA=blink-server@$PROJECT.iam.gserviceaccount.com
 
 echo "Deploying Blink to $PROJECT in $REGION"
@@ -36,7 +36,7 @@ for role in roles/compute.instanceAdmin.v1 roles/compute.networkViewer; do
     --condition None --quiet >/dev/null
 done
 
-# Keys, the usage ledger and the class list live in a bucket, so they
+# Keys, the usage ledger and who can sign in live in a bucket, so they
 # survive restarts and new versions.
 if ! gcloud storage buckets describe "gs://$BUCKET" --project "$PROJECT" >/dev/null 2>&1; then
   gcloud storage buckets create "gs://$BUCKET" --location "$REGION" --uniform-bucket-level-access --project "$PROJECT"

@@ -18,12 +18,22 @@ type size struct {
 	CPU     string  `json:"cpu"`
 	Memory  string  `json:"memory"`
 	Hourly  float64 `json:"hourly"`
+	Editor  bool    `json:"editor"` // gets VS Code in the browser; 1 GB is too little for it
 }
 
 var menu = []size{
-	{ID: "small", Label: "Small", Machine: "e2-micro", CPU: "2 shared vCPUs", Memory: "1 GB", Hourly: 0.014},
-	{ID: "medium", Label: "Medium", Machine: "e2-medium", CPU: "2 shared vCPUs", Memory: "4 GB", Hourly: 0.039},
-	{ID: "large", Label: "Large", Machine: "e2-standard-4", CPU: "4 vCPUs", Memory: "16 GB", Hourly: 0.14},
+	{ID: "small", Label: "Small", Machine: "e2-micro", CPU: "2 shared vCPUs", Memory: "1 GB", Hourly: 0.015},
+	{ID: "medium", Label: "Medium", Machine: "e2-medium", CPU: "2 shared vCPUs", Memory: "4 GB", Hourly: 0.040, Editor: true},
+	{ID: "large", Label: "Large", Machine: "e2-standard-4", CPU: "4 vCPUs", Memory: "16 GB", Hourly: 0.141, Editor: true},
+}
+
+func sizeByID(id string) (size, bool) {
+	for _, s := range menu {
+		if s.ID == id {
+			return s, true
+		}
+	}
+	return size{}, false
 }
 
 var lifetimes = []time.Duration{30 * time.Minute, time.Hour, 2 * time.Hour}

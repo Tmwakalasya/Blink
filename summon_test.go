@@ -166,6 +166,7 @@ func TestStartRefusesASecondVM(t *testing.T) {
 	fc := newFakeCloud("127.0.0.1")
 	fc.put(machine{Name: "blink-abc123", Zone: "us-central1-a", Status: "RUNNING", IP: "127.0.0.1", Owner: "local", blink: true})
 	s := testServer(t, fc, "22")
+	s.ledger.add(usage{VM: "blink-abc123", Zone: "us-central1-a", Owner: "local", Hourly: 0.015, Start: time.Now(), TTL: 1800})
 
 	rec := request(s.routes(), "POST", "/api/vms", `{"size":"small","ttlSeconds":1800}`, nil)
 
@@ -178,6 +179,23 @@ func TestStartRefusesASecondVM(t *testing.T) {
 	}
 	if body.VM == nil || body.VM.Name != "blink-abc123" {
 		t.Errorf("409 should point at the running VM, got %+v", body)
+	}
+}
+
+func TestStartForgetsVMsThatAreGone(t *testing.T) {
+	fc := newFakeCloud("127.0.0.1")
+	s := testServer(t, fc, "22")
+	// The ledger thinks this VM is running, but it was deleted in the console.
+	s.ledger.add(usage{VM: "blink-gone01", Zone: "us-central1-a", Owner: "local", Hourly: 0.015, Start: time.Now(), TTL: 1800})
+
+	if _, no := s.admitStart(context.Background(), fc, localUser, s.sizes[0], 30*time.Minute); no != nil {
+		t.Fatalf("a VM that no longer exists blocked a new one: %s", no.Error)
+	}
+	if _, ok := s.ledger.activeFor("local", time.Now().Add(time.Minute)); !ok {
+		t.Fatal("the new VM wasn't recorded")
+	}
+	if u, _ := s.ledger.activeFor("local", time.Now()); u.VM == "blink-gone01" {
+		t.Error("the deleted VM still counts as running")
 	}
 }
 

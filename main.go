@@ -55,7 +55,7 @@ func main() {
 	flag.StringVar(&cfg.Addr, "addr", addr, "address to serve the page on")
 	flag.StringVar(&cfg.Project, "project", "", "Google Cloud project ID (default: your gcloud project)")
 	flag.StringVar(&cfg.Zone, "zone", env("BLINK_ZONE", "us-central1-a"), "zone to create VMs in")
-	flag.StringVar(&cfg.Image, "image", env("BLINK_IMAGE", "projects/debian-cloud/global/images/family/debian-12"), "boot disk image")
+	flag.StringVar(&cfg.Image, "image", env("BLINK_IMAGE", defaultImage), "boot disk image (default: the pre-built image if you've made one, else Debian 12)")
 	flag.StringVar(&cfg.Network, "network", env("BLINK_NETWORK", "default"), "VPC network for the VMs")
 	flag.BoolVar(&cfg.Open, "open", port == "", "open the page in your browser")
 	flag.StringVar(&cfg.State, "state", env("BLINK_STATE", filepath.Join(home, ".blink")), "directory for keys, the usage ledger and the class list")

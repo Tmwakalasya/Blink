@@ -5,178 +5,200 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
 <title>Blink · Temporary Linux VMs</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23131715'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23bc4228'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23131715'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23bc4228'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500&family=Geist+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="bar">
-  <div class="wrap bar-inner">
-    <a class="wordmark" href="/">blink<span class="stop">.</span></a>
-    <div class="bar-links">
-      <span class="who" id="who" hidden></span>
-      <a class="link" id="console" href="#" target="_blank" rel="noreferrer" hidden>Compute Engine <span aria-hidden="true">↗</span></a>
-      <button class="link" id="signout" hidden>Sign out</button>
-    </div>
+<header class="topbar">
+  <a class="brand" href="/"><span class="mark" aria-hidden="true"></span>blink</a>
+  <nav class="crumbs" id="where-line" hidden><span class="sep">/</span><span id="where"></span></nav>
+  <div class="topbar-right">
+    <span class="conn" id="conn" hidden><span class="dot off" id="dot"></span><span id="conn-text"></span></span>
+    <a class="toplink" id="console" href="#" target="_blank" rel="noreferrer" hidden>Compute Engine ↗</a>
+    <span class="who" id="who" hidden></span>
+    <button class="toplink" id="signout" hidden>Sign out</button>
   </div>
 </header>
 
-<main class="wrap home" id="home">
-  <p class="eyebrow where" id="where-line" hidden><span class="dot off" id="dot"></span><span id="where"></span></p>
-  <h1 class="display">Temporary Linux VMs<span class="stop">.</span></h1>
-
-  <section id="signin" hidden>
-    <div class="lede">
-      <p>Blink starts a Linux VM on Google Cloud and opens its terminal on this page.</p>
-      <p class="muted">Sign in with the Google account on your class list.</p>
+<main class="page" id="home">
+  <section class="signin" id="signin" hidden>
+    <div class="signin-card">
+      <span class="mark mark-lg" aria-hidden="true"></span>
+      <h1>Sign in to Blink</h1>
+      <p class="muted">Temporary Linux VMs on Google Cloud, with VS Code and a terminal in the browser.</p>
+      <div class="gsi" id="gsi"></div>
+      <p class="form-error" id="signin-error" hidden></p>
+      <div class="request" id="request" hidden>
+        <p id="request-text"></p>
+        <button class="btn btn-primary" id="request-btn">Request access</button>
+      </div>
     </div>
-    <div class="actions"><div class="gsi" id="gsi"></div></div>
-    <p class="form-error" id="signin-error" hidden></p>
   </section>
 
   <section id="idle" hidden>
-    <div class="lede">
-      <p>Pick a size and how long you need it. Blink starts the VM on Google Cloud and opens its terminal on this page.</p>
-      <p class="muted">Compute Engine deletes it when the time is up.</p>
+    <div class="page-head">
+      <div>
+        <h1>Virtual machines</h1>
+        <p class="muted">Temporary Linux VMs on Google Cloud. Compute Engine deletes each one when its lifetime ends.</p>
+      </div>
     </div>
-
-    <fieldset class="choice">
-      <legend class="eyebrow">Size</legend>
-      <div class="sizes" id="sizes"></div>
-    </fieldset>
-    <fieldset class="choice">
-      <legend class="eyebrow">Lifetime</legend>
-      <div class="pills" id="lifetimes"></div>
-    </fieldset>
-    <p class="estimate" id="estimate"></p>
 
     <div class="notice" id="notice" hidden>
-      <p class="eyebrow notice-label" id="notice-label"></p>
-      <p class="notice-text" id="notice-text"></p>
-      <div class="command" id="fix" hidden><code id="fix-text"></code><button class="btn btn-secondary btn-sm copy">Copy</button></div>
+      <p class="notice-label" id="notice-label"></p>
+      <p id="notice-text"></p>
+      <div class="command" id="fix" hidden><code id="fix-text"></code><button class="btn btn-secondary btn-xs copy">Copy</button></div>
     </div>
-    <div class="actions">
-      <button class="btn btn-primary btn-lg" id="start" disabled>Start VM <span aria-hidden="true">→</span></button>
-      <button class="btn btn-secondary btn-lg" id="recheck" hidden>Check again</button>
-    </div>
-    <p class="limit-note" id="limit-note" hidden></p>
 
-    <div class="meters" id="meters" hidden>
-      <div class="meter" id="budget-meter" hidden>
-        <p class="eyebrow">Class budget</p>
-        <div class="track"><div class="fill" id="budget-fill"></div></div>
-        <p class="meter-text" id="budget-text"></p>
+    <div class="create">
+      <div class="card">
+        <div class="card-head"><h2>New VM</h2></div>
+        <div class="field">
+          <p class="label" id="size-label">Size</p>
+          <div class="size-table" id="sizes" role="radiogroup" aria-labelledby="size-label"></div>
+        </div>
+        <div class="field">
+          <p class="label" id="ttl-label">Lifetime</p>
+          <div class="segmented" id="lifetimes" role="radiogroup" aria-labelledby="ttl-label"></div>
+        </div>
       </div>
-      <div class="meter" id="week-meter" hidden>
-        <p class="eyebrow">Your hours this week</p>
-        <div class="track"><div class="fill" id="week-fill"></div></div>
-        <p class="meter-text" id="week-text"></p>
-      </div>
-      <div class="meter" id="vms-meter" hidden>
-        <p class="eyebrow">VMs running</p>
-        <div class="track"><div class="fill" id="vms-fill"></div></div>
-        <p class="meter-text" id="vms-text"></p>
-      </div>
+
+      <aside class="card summary">
+        <div class="card-head"><h2>Summary</h2></div>
+        <dl class="kv">
+          <div><dt>Machine</dt><dd id="sum-machine"></dd></div>
+          <div><dt>Image</dt><dd id="sum-image"></dd></div>
+          <div><dt>Zone</dt><dd id="sum-zone"></dd></div>
+          <div><dt>Lifetime</dt><dd id="sum-ttl"></dd></div>
+          <div class="kv-total"><dt>Estimated cost</dt><dd id="sum-cost"></dd></div>
+        </dl>
+        <div class="summary-actions">
+          <button class="btn btn-primary btn-block" id="start" disabled>Create VM</button>
+          <button class="btn btn-secondary btn-block" id="recheck" hidden>Check again</button>
+          <p class="limit-note" id="limit-note" hidden></p>
+        </div>
+        <div class="meters" id="meters" hidden>
+          <div class="meter" id="budget-meter" hidden>
+            <div class="meter-row"><span>Budget</span><span class="mono" id="budget-text"></span></div>
+            <div class="track"><div class="fill" id="budget-fill"></div></div>
+          </div>
+          <div class="meter" id="week-meter" hidden>
+            <div class="meter-row"><span>Your hours this week</span><span class="mono" id="week-text"></span></div>
+            <div class="track"><div class="fill" id="week-fill"></div></div>
+          </div>
+          <div class="meter" id="vms-meter" hidden>
+            <div class="meter-row"><span>VMs running</span><span class="mono" id="vms-text"></span></div>
+            <div class="track"><div class="fill" id="vms-fill"></div></div>
+          </div>
+        </div>
+      </aside>
     </div>
 
     <section class="how" aria-labelledby="how-title">
-      <p class="eyebrow" id="how-title">How it works</p>
+      <h2 id="how-title">How it works</h2>
       <ol>
-        <li>
-          <span class="eyebrow">01</span>
-          <h3>Start</h3>
-          <p>Blink asks Compute Engine for a VM of the size you picked, with an SSH key generated for that VM only.</p>
-        </li>
-        <li>
-          <span class="eyebrow">02</span>
-          <h3>Connect</h3>
-          <p>Once the VM boots, Blink checks its SSH host key against the one Google publishes for it, then opens the terminal here.</p>
-        </li>
-        <li>
-          <span class="eyebrow">03</span>
-          <h3>Use</h3>
-          <p>You log in as <code>blink</code>, with sudo. The session carries on if you reload the page.</p>
-        </li>
-        <li>
-          <span class="eyebrow">04</span>
-          <h3>Delete</h3>
-          <p>Compute Engine deletes the VM when its lifetime ends, whether or not Blink is still running. Delete VM removes it sooner.</p>
-        </li>
+        <li><span class="mono">01</span><h3>Create</h3><p>Compute Engine starts a VM of the size you picked, with an SSH key made for that VM alone.</p></li>
+        <li><span class="mono">02</span><h3>Connect</h3><p>Blink checks the VM's host key against the one Google publishes, then opens it here.</p></li>
+        <li><span class="mono">03</span><h3>Work</h3><p>Medium and Large open VS Code; every size has a terminal. You're <code>blink</code>, with sudo.</p></li>
+        <li><span class="mono">04</span><h3>Expire</h3><p>Compute Engine deletes the VM when its lifetime ends, even if Blink is offline.</p></li>
       </ol>
     </section>
 
     <section class="admin" id="admin" hidden>
-      <p class="eyebrow">Class list</p>
-      <p class="admin-note">One email per line. A line like <code>@school.edu</code> lets in everyone with an address there.</p>
-      <textarea id="roster" rows="8" spellcheck="false" aria-label="Class list"></textarea>
-      <div class="actions">
-        <button class="btn btn-primary" id="save-roster">Save class list</button>
-        <span class="saved" id="roster-status" role="status"></span>
+      <div class="card" id="requests" hidden>
+        <div class="card-head"><h2>Requests</h2></div>
+        <ul class="request-list" id="request-list"></ul>
       </div>
-      <p class="eyebrow usage-title">Last 7 days</p>
-      <table class="usage" id="usage">
-        <thead><tr><th>Person</th><th>VMs</th><th>Hours</th><th>Cost</th></tr></thead>
-        <tbody></tbody>
-      </table>
+      <div class="card">
+        <div class="card-head"><h2>Who can sign in</h2><p class="muted">One email per line, or <code>@school.edu</code> for a whole domain.</p></div>
+        <textarea id="roster" rows="8" spellcheck="false" aria-label="Who can sign in"></textarea>
+        <div class="card-foot">
+          <span class="saved" id="roster-status" role="status"></span>
+          <button class="btn btn-primary btn-sm" id="save-roster">Save</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Usage</h2><p class="muted">Last 7 days</p></div>
+        <table class="table" id="usage">
+          <thead><tr><th>Person</th><th>VMs</th><th>Hours</th><th>Cost</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </section>
   </section>
 
-  <section class="panel" id="progress" hidden>
-    <div class="panel-side">
+  <section id="progress" hidden>
+    <div class="page-head">
       <div>
-        <p class="eyebrow on-dark" id="p-name">New VM</p>
-        <p class="stat" id="clock">0.0</p>
-        <p class="eyebrow on-dark">Seconds</p>
+        <p class="crumb-line mono" id="p-name">new vm</p>
+        <h1 id="p-title">Creating VM</h1>
       </div>
-      <dl class="panel-facts">
-        <div><dt class="eyebrow on-dark">Size</dt><dd id="p-size"></dd></div>
-        <div><dt class="eyebrow on-dark">Machine</dt><dd id="p-machine"></dd></div>
-        <div><dt class="eyebrow on-dark">Lifetime</dt><dd id="p-ttl"></dd></div>
-      </dl>
-    </div>
-    <div class="panel-main">
-      <ol class="steps" id="steps" aria-live="polite">
-        <li data-step="requested"><p class="eyebrow">01</p><div class="step-row"><span class="step-name">Request</span><time></time></div><p class="step-note"></p></li>
-        <li data-step="creating"><p class="eyebrow">02</p><div class="step-row"><span class="step-name">Provision</span><time></time></div><p class="step-note"></p></li>
-        <li data-step="booting"><p class="eyebrow">03</p><div class="step-row"><span class="step-name">Boot</span><time></time></div><p class="step-note"></p></li>
-        <li data-step="ssh"><p class="eyebrow">04</p><div class="step-row"><span class="step-name">SSH</span><time></time></div><p class="step-note"></p></li>
-      </ol>
-      <div class="failure" id="failure" hidden>
-        <p class="failure-text" id="failure-text"></p>
-        <div class="command dark" id="failure-fix" hidden><code id="failure-fix-text"></code><button class="btn btn-outline-light btn-sm copy">Copy</button></div>
-        <div class="actions">
-          <button class="btn btn-light" id="retry">Try again</button>
-          <button class="btn btn-outline-light" id="back">Back</button>
-        </div>
+      <div class="page-head-right">
+        <span class="pill" id="p-status"><span class="dot"></span><span id="p-status-text">Provisioning</span></span>
+        <span class="timer mono" id="clock">0.0s</span>
       </div>
     </div>
+    <ol class="tracker" id="steps">
+      <li data-step="requested"><span class="tick"></span><span class="tname">Request</span><time></time></li>
+      <li data-step="creating"><span class="tick"></span><span class="tname">Provision</span><time></time></li>
+      <li data-step="booting"><span class="tick"></span><span class="tname">Boot</span><time></time></li>
+      <li data-step="ssh"><span class="tick"></span><span class="tname">SSH</span><time></time></li>
+    </ol>
+    <div class="log" id="log" aria-live="polite"></div>
+    <div class="failure" id="failure" hidden>
+      <p id="failure-text"></p>
+      <div class="command" id="failure-fix" hidden><code id="failure-fix-text"></code><button class="btn btn-secondary btn-xs copy">Copy</button></div>
+      <div class="failure-actions">
+        <button class="btn btn-primary btn-sm" id="retry">Try again</button>
+        <button class="btn btn-secondary btn-sm" id="back">Back</button>
+      </div>
+    </div>
+    <dl class="kv kv-inline">
+      <div><dt>Size</dt><dd id="p-size"></dd></div>
+      <div><dt>Machine</dt><dd id="p-machine"></dd></div>
+      <div><dt>Lifetime</dt><dd id="p-ttl"></dd></div>
+    </dl>
   </section>
 </main>
 
-<section class="shell" id="shell" hidden>
-  <div class="wrap shell-head">
-    <dl class="facts">
-      <div><dt class="eyebrow">VM</dt><dd id="s-name"></dd></div>
-      <div><dt class="eyebrow">Size</dt><dd id="s-size"></dd></div>
-      <div><dt class="eyebrow">Address</dt><dd id="s-ip"></dd></div>
-      <div><dt class="eyebrow">Ready in</dt><dd id="s-ready"></dd></div>
-      <div><dt class="eyebrow">Remaining</dt><dd id="s-left"></dd></div>
+<section class="vm" id="shell" hidden>
+  <div class="vm-head">
+    <div class="vm-id">
+      <span class="vm-name mono" id="s-name"></span>
+      <span class="pill pill-ok"><span class="dot"></span>Running</span>
+    </div>
+    <dl class="vm-facts">
+      <div><dt>Size</dt><dd id="s-size"></dd></div>
+      <div><dt>IP</dt><dd><button class="copyable mono" id="s-ip" title="Copy IP"></button></dd></div>
+      <div><dt>Ready in</dt><dd class="mono" id="s-ready"></dd></div>
+      <div><dt>Deletes in</dt><dd class="mono" id="s-left"></dd></div>
     </dl>
-    <div class="actions">
-      <button class="btn btn-secondary" id="s-copy">Copy SSH command</button>
-      <button class="btn btn-danger" id="s-end">Delete VM</button>
+    <div class="vm-actions">
+      <a class="btn btn-secondary btn-sm" id="s-open" target="_blank" rel="noreferrer" hidden>Open in new tab ↗</a>
+      <button class="btn btn-secondary btn-sm" id="s-copy">Copy SSH command</button>
+      <button class="btn btn-danger btn-sm" id="s-end">Delete</button>
     </div>
   </div>
-  <div class="wrap term-area">
-    <div class="term-panel">
-      <div class="term" id="term"></div>
-      <div class="curtain" id="curtain" hidden>
-        <p id="curtain-text"></p>
-        <button class="btn btn-light" id="curtain-btn"></button>
+  <div class="tabs" id="tabs" role="tablist" hidden>
+    <button class="tab" role="tab" id="tab-editor" aria-selected="true">VS Code</button>
+    <button class="tab" role="tab" id="tab-terminal" aria-selected="false">Terminal</button>
+  </div>
+  <div class="workspace">
+    <div class="term" id="term"></div>
+    <div class="editor" id="editor" hidden>
+      <div class="editor-wait" id="editor-wait">
+        <span class="spinner" aria-hidden="true"></span>
+        <p>Starting VS Code on the VM</p>
+        <p class="mono" id="editor-wait-time"></p>
       </div>
+      <iframe id="editor-frame" title="VS Code" hidden></iframe>
+    </div>
+    <div class="curtain" id="curtain" hidden>
+      <p id="curtain-text"></p>
+      <button class="btn btn-primary" id="curtain-btn"></button>
     </div>
   </div>
 </section>

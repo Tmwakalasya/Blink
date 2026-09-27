@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -170,6 +171,10 @@ func (s *sshServer) serve(nc net.Conn, cfg *ssh.ServerConfig) {
 	defer conn.Close()
 	go ssh.DiscardRequests(reqs)
 	for nch := range chans {
+		if nch.ChannelType() == "direct-tcpip" {
+			go forward(nch) // port forwarding, which the editor rides on
+			continue
+		}
 		if nch.ChannelType() != "session" {
 			nch.Reject(ssh.UnknownChannelType, "sessions only")
 			continue
@@ -198,6 +203,38 @@ func (s *sshServer) serve(nc net.Conn, cfg *ssh.ServerConfig) {
 			ch.Close()
 		}()
 	}
+}
+
+// forward connects a direct-tcpip channel to the address it asks for, as
+// sshd does for ssh -L.
+func forward(nch ssh.NewChannel) {
+	var target struct {
+		Host     string
+		Port     uint32
+		FromHost string
+		FromPort uint32
+	}
+	if ssh.Unmarshal(nch.ExtraData(), &target) != nil {
+		nch.Reject(ssh.ConnectionFailed, "bad request")
+		return
+	}
+	conn, err := net.Dial("tcp", net.JoinHostPort(target.Host, strconv.Itoa(int(target.Port))))
+	if err != nil {
+		nch.Reject(ssh.ConnectionFailed, err.Error())
+		return
+	}
+	ch, reqs, err := nch.Accept()
+	if err != nil {
+		conn.Close()
+		return
+	}
+	go ssh.DiscardRequests(reqs)
+	go func() {
+		io.Copy(conn, ch)
+		conn.Close()
+	}()
+	io.Copy(ch, conn)
+	ch.Close()
 }
 
 func newSigner(t *testing.T) ssh.Signer {
