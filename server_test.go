@@ -75,6 +75,8 @@ func TestNewInstanceSelfDestructs(t *testing.T) {
 		Network:   "default",
 		TTL:       30 * time.Minute,
 		PublicKey: "ssh-ed25519 AAAAC3Nz blink",
+		Owner:     ownerID(studentEmail),
+		Size:      "small",
 	})
 
 	if got := inst.GetScheduling().GetMaxRunDuration().GetSeconds(); got != 1800 {
@@ -93,8 +95,14 @@ func TestNewInstanceSelfDestructs(t *testing.T) {
 	if meta["ssh-keys"] != "blink:ssh-ed25519 AAAAC3Nz blink" {
 		t.Errorf("ssh-keys = %q", meta["ssh-keys"])
 	}
-	if meta["enable-oslogin"] != "FALSE" || meta["enable-guest-attributes"] != "TRUE" {
+	if meta["enable-oslogin"] != "FALSE" || meta["enable-guest-attributes"] != "TRUE" || meta["block-project-ssh-keys"] != "TRUE" {
 		t.Errorf("metadata = %v", meta)
+	}
+	if got := inst.GetLabels(); got["blink-owner"] != ownerID(studentEmail) || got["blink-size"] != "small" {
+		t.Errorf("labels = %v, want the owner and size", got)
+	}
+	if m := machineFrom(inst); m.Owner != ownerID(studentEmail) || m.Size != "small" || !m.blink {
+		t.Errorf("reading the VM back lost its labels: %+v", m)
 	}
 	if !inst.GetDisks()[0].GetAutoDelete() {
 		t.Error("boot disk must be deleted with the VM")

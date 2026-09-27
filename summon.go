@@ -7,18 +7,21 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
+	"slices"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 )
 
-// A summon is one click of the button: create a VM, wait for it to boot, and
-// prove SSH works, streaming each step to the page as it happens.
+// Starting a VM: check the limits, create it, wait for it to boot, and prove
+// SSH works, streaming each step to the page as it happens.
 
-// event is one line of the NDJSON stream the page reads while summoning.
+// event is one line of the NDJSON stream the page reads while a VM starts.
 type event struct {
 	Step  string   `json:"step,omitempty"` // requested, creating, booting, ssh
 	At    float64  `json:"at"`             // seconds since the click
@@ -37,67 +40,125 @@ const (
 
 var errHostKey = errors.New("host key doesn't match the one Google published")
 
-func (s *server) handleSummon(w http.ResponseWriter, r *http.Request) {
+type startRequest struct {
+	Size       string `json:"size"`
+	TTLSeconds int    `json:"ttlSeconds"`
+}
+
+// refusal is why a VM can't start right now.
+type refusal struct {
+	code int
+	apiError
+}
+
+func (s *server) handleSummon(w http.ResponseWriter, r *http.Request, u user) {
 	start := time.Now()
 	c := s.currentCloud()
 	if c == nil {
-		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "Blink isn't connected to Google Cloud yet."})
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: errNotConnected.Error()})
 		return
 	}
-	if !s.summoning.CompareAndSwap(false, true) {
-		writeJSON(w, http.StatusConflict, apiError{Error: "A VM is already on its way."})
+	var req startRequest
+	if json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req) != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "Couldn't read the request."})
 		return
 	}
-	defer s.summoning.Store(false)
+	i := slices.IndexFunc(s.sizes, func(sz size) bool { return sz.ID == req.Size })
+	ttl := time.Duration(req.TTLSeconds) * time.Second
+	if i < 0 || !slices.Contains(s.lifetimes, ttl) {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "Pick one of the sizes and lifetimes on the page."})
+		return
+	}
 
-	// Keep going if the page is closed or reloaded mid-summon. The VM still
+	// Keep going if the page is closed or reloaded mid-start. The VM still
 	// comes up, and the page reconnects to it when it loads again.
 	ctx := context.WithoutCancel(r.Context())
-
-	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	ms, err := c.List(lctx)
-	cancel()
-	if err != nil {
-		problem, fix := s.explain(err)
-		writeJSON(w, http.StatusBadGateway, apiError{Error: problem, Fix: fix})
+	sp, no := s.admitStart(ctx, c, u, s.sizes[i], ttl)
+	if no != nil {
+		writeJSON(w, no.code, no.apiError)
 		return
 	}
-	var live []machine
-	for _, m := range ms {
-		if m.alive() {
-			live = append(live, m)
-		}
-	}
-	if len(live) >= maxLive {
-		m := live[0]
-		s.decorate(&m)
-		writeJSON(w, http.StatusConflict, apiError{Error: m.Name + " is still running.", VM: &m})
-		return
-	}
+	defer func() {
+		s.admit.Lock()
+		delete(s.starting, u.owner)
+		s.admit.Unlock()
+	}()
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
 	enc := json.NewEncoder(w)
-	s.summon(ctx, start, func(e event) {
+	s.summon(ctx, start, sp, u, func(e event) {
 		if enc.Encode(e) == nil {
 			rc.Flush()
 		}
 	})
 }
 
-func (s *server) summon(ctx context.Context, start time.Time, emit func(event)) {
-	at := func() float64 { return math.Round(time.Since(start).Seconds()*10) / 10 }
-	c := s.currentCloud()
+// admitStart checks everything that could stop u from starting a VM of size
+// sz for ttl, and records it in the ledger if not. It holds the admission
+// lock throughout, so two requests can't both slip under a limit.
+func (s *server) admitStart(ctx context.Context, c cloud, u user, sz size, ttl time.Duration) (spec, *refusal) {
+	s.admit.Lock()
+	defer s.admit.Unlock()
+	no := func(code int, format string, args ...any) *refusal {
+		return &refusal{code: code, apiError: apiError{Error: fmt.Sprintf(format, args...)}}
+	}
+	if s.starting[u.owner] {
+		return spec{}, no(http.StatusConflict, "Your VM is already starting.")
+	}
+	lctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ms, err := c.List(lctx)
+	cancel()
+	if err != nil {
+		problem, fix := s.explain(err)
+		return spec{}, &refusal{code: http.StatusBadGateway, apiError: apiError{Error: problem, Fix: fix}}
+	}
+	for _, m := range ms {
+		if m.alive() && m.Owner == u.owner {
+			s.decorate(&m, u)
+			return spec{}, &refusal{code: http.StatusConflict, apiError: apiError{Error: m.Name + " is still running.", VM: &m}}
+		}
+	}
+
+	now := time.Now()
+	t := s.ledger.totals(u.owner, now)
+	cost := sz.cost(ttl)
+	switch {
+	case t.Active >= s.cfg.MaxVMs:
+		return spec{}, no(http.StatusConflict, "All %d VMs are in use. Try again when one frees up.", s.cfg.MaxVMs)
+	case s.cfg.Budget > 0 && t.Spent+cost > s.cfg.Budget:
+		return spec{}, no(http.StatusForbidden, "That would go over the $%.2f budget ($%.2f used). Try a smaller size or a shorter lifetime.", s.cfg.Budget, t.Spent)
+	case s.cfg.WeeklyHours > 0 && !u.Admin && t.Hours+ttl.Hours() > s.cfg.WeeklyHours:
+		return spec{}, no(http.StatusForbidden, "That would go over your %s a week (%s used). Try a shorter lifetime.",
+			hoursText(s.cfg.WeeklyHours), hoursText(t.Hours))
+	}
+
 	sp := spec{
 		Name:    "blink-" + randomSuffix(),
 		Zone:    s.cfg.Zone,
-		Machine: s.cfg.Machine,
+		Machine: sz.Machine,
+		Size:    sz.ID,
 		Image:   s.cfg.Image,
 		Network: s.cfg.Network,
-		TTL:     s.cfg.TTL,
+		TTL:     ttl,
+		Owner:   u.owner,
 	}
+	err = s.ledger.add(usage{
+		VM: sp.Name, Owner: u.owner, Email: u.Email, Size: sz.ID, Hourly: sz.Hourly,
+		Start: now, TTL: int64(ttl / time.Second),
+	})
+	if err != nil {
+		return spec{}, no(http.StatusInternalServerError, "Couldn't record the VM: %v", err)
+	}
+	s.starting[u.owner] = true
+	return sp, nil
+}
+
+func (s *server) summon(ctx context.Context, start time.Time, sp spec, u user, emit func(event)) {
+	at := func() float64 { return math.Round(time.Since(start).Seconds()*10) / 10 }
+	c := s.currentCloud()
 	step := "requested"
 	fail := func(err error, created bool) {
 		problem, fix := s.explain(err)
@@ -106,12 +167,13 @@ func (s *server) summon(ctx context.Context, start time.Time, emit func(event)) 
 		}
 		emit(event{Step: step, At: at(), Error: problem, Fix: fix})
 		if created {
-			// Don't leave a broken VM running until its timer runs out.
+			// Don't leave a broken VM running until its lifetime ends.
 			dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			c.Delete(dctx, sp.Zone, sp.Name)
 			cancel()
 		}
 		s.keys.remove(sp.Name)
+		s.ledger.end(sp.Name, time.Now())
 	}
 
 	signer, pub, err := s.keys.create(sp.Name)
@@ -167,7 +229,7 @@ func (s *server) summon(ctx context.Context, start time.Time, emit func(event)) 
 	}
 	emit(event{Step: "ssh", At: at(), Note: note})
 
-	s.decorate(&m)
+	s.decorate(&m, u)
 	emit(event{At: at(), VM: &m})
 }
 
@@ -320,4 +382,11 @@ func randomSuffix() string {
 	b := make([]byte, 3)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func hoursText(h float64) string {
+	if h == math.Trunc(h) {
+		return fmt.Sprintf("%.0f h", h)
+	}
+	return fmt.Sprintf("%.1f h", h)
 }

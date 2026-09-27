@@ -16,25 +16,43 @@
 <header class="bar">
   <div class="wrap bar-inner">
     <a class="wordmark" href="/">blink<span class="stop">.</span></a>
-    <a class="link" id="console" href="#" target="_blank" rel="noreferrer" hidden>Compute Engine <span aria-hidden="true">↗</span></a>
+    <div class="bar-links">
+      <span class="who" id="who" hidden></span>
+      <a class="link" id="console" href="#" target="_blank" rel="noreferrer" hidden>Compute Engine <span aria-hidden="true">↗</span></a>
+      <button class="link" id="signout" hidden>Sign out</button>
+    </div>
   </div>
 </header>
 
 <main class="wrap home" id="home">
-  <p class="eyebrow where"><span class="dot off" id="dot"></span><span id="where">Connecting</span></p>
+  <p class="eyebrow where" id="where-line" hidden><span class="dot off" id="dot"></span><span id="where"></span></p>
   <h1 class="display">Temporary Linux VMs<span class="stop">.</span></h1>
 
-  <section id="idle">
+  <section id="signin" hidden>
     <div class="lede">
-      <p>Blink creates a VM in your Google Cloud project and opens its terminal on this page.</p>
-      <p class="muted">Compute Engine deletes it after <span data-ttl>30 min</span>.</p>
+      <p>Blink starts a Linux VM on Google Cloud and opens its terminal on this page.</p>
+      <p class="muted">Sign in with the Google account on your class list.</p>
     </div>
-    <dl class="specs">
-      <div><dt class="eyebrow">Machine</dt><dd id="spec-machine">&nbsp;</dd></div>
-      <div><dt class="eyebrow">Image</dt><dd id="spec-image">&nbsp;</dd></div>
-      <div><dt class="eyebrow">Zone</dt><dd id="spec-zone">&nbsp;</dd></div>
-      <div><dt class="eyebrow">Deleted after</dt><dd data-ttl>&nbsp;</dd></div>
-    </dl>
+    <div class="actions"><div class="gsi" id="gsi"></div></div>
+    <p class="form-error" id="signin-error" hidden></p>
+  </section>
+
+  <section id="idle" hidden>
+    <div class="lede">
+      <p>Pick a size and how long you need it. Blink starts the VM on Google Cloud and opens its terminal on this page.</p>
+      <p class="muted">Compute Engine deletes it when the time is up.</p>
+    </div>
+
+    <fieldset class="choice">
+      <legend class="eyebrow">Size</legend>
+      <div class="sizes" id="sizes"></div>
+    </fieldset>
+    <fieldset class="choice">
+      <legend class="eyebrow">Lifetime</legend>
+      <div class="pills" id="lifetimes"></div>
+    </fieldset>
+    <p class="estimate" id="estimate"></p>
+
     <div class="notice" id="notice" hidden>
       <p class="eyebrow notice-label" id="notice-label"></p>
       <p class="notice-text" id="notice-text"></p>
@@ -44,6 +62,25 @@
       <button class="btn btn-primary btn-lg" id="start" disabled>Start VM <span aria-hidden="true">→</span></button>
       <button class="btn btn-secondary btn-lg" id="recheck" hidden>Check again</button>
     </div>
+    <p class="limit-note" id="limit-note" hidden></p>
+
+    <div class="meters" id="meters" hidden>
+      <div class="meter" id="budget-meter" hidden>
+        <p class="eyebrow">Class budget</p>
+        <div class="track"><div class="fill" id="budget-fill"></div></div>
+        <p class="meter-text" id="budget-text"></p>
+      </div>
+      <div class="meter" id="week-meter" hidden>
+        <p class="eyebrow">Your hours this week</p>
+        <div class="track"><div class="fill" id="week-fill"></div></div>
+        <p class="meter-text" id="week-text"></p>
+      </div>
+      <div class="meter" id="vms-meter" hidden>
+        <p class="eyebrow">VMs running</p>
+        <div class="track"><div class="fill" id="vms-fill"></div></div>
+        <p class="meter-text" id="vms-text"></p>
+      </div>
+    </div>
 
     <section class="how" aria-labelledby="how-title">
       <p class="eyebrow" id="how-title">How it works</p>
@@ -51,7 +88,7 @@
         <li>
           <span class="eyebrow">01</span>
           <h3>Start</h3>
-          <p>Blink asks Compute Engine for the VM described above, with an SSH key generated for that VM only.</p>
+          <p>Blink asks Compute Engine for a VM of the size you picked, with an SSH key generated for that VM only.</p>
         </li>
         <li>
           <span class="eyebrow">02</span>
@@ -61,14 +98,29 @@
         <li>
           <span class="eyebrow">03</span>
           <h3>Use</h3>
-          <p>You log in as <code>blink</code>, with sudo. Copy SSH command lets you connect from your own terminal as well.</p>
+          <p>You log in as <code>blink</code>, with sudo. The session carries on if you reload the page.</p>
         </li>
         <li>
           <span class="eyebrow">04</span>
           <h3>Delete</h3>
-          <p>Compute Engine deletes the VM after <span data-ttl>30 min</span>, whether or not Blink is still running. Delete VM removes it sooner.</p>
+          <p>Compute Engine deletes the VM when its lifetime ends, whether or not Blink is still running. Delete VM removes it sooner.</p>
         </li>
       </ol>
+    </section>
+
+    <section class="admin" id="admin" hidden>
+      <p class="eyebrow">Class list</p>
+      <p class="admin-note">One email per line. A line like <code>@school.edu</code> lets in everyone with an address there.</p>
+      <textarea id="roster" rows="8" spellcheck="false" aria-label="Class list"></textarea>
+      <div class="actions">
+        <button class="btn btn-primary" id="save-roster">Save class list</button>
+        <span class="saved" id="roster-status" role="status"></span>
+      </div>
+      <p class="eyebrow usage-title">Last 7 days</p>
+      <table class="usage" id="usage">
+        <thead><tr><th>Person</th><th>VMs</th><th>Hours</th><th>Cost</th></tr></thead>
+        <tbody></tbody>
+      </table>
     </section>
   </section>
 
@@ -80,9 +132,9 @@
         <p class="eyebrow on-dark">Seconds</p>
       </div>
       <dl class="panel-facts">
+        <div><dt class="eyebrow on-dark">Size</dt><dd id="p-size"></dd></div>
         <div><dt class="eyebrow on-dark">Machine</dt><dd id="p-machine"></dd></div>
-        <div><dt class="eyebrow on-dark">Image</dt><dd id="p-image"></dd></div>
-        <div><dt class="eyebrow on-dark">Deleted after</dt><dd id="p-ttl"></dd></div>
+        <div><dt class="eyebrow on-dark">Lifetime</dt><dd id="p-ttl"></dd></div>
       </dl>
     </div>
     <div class="panel-main">
@@ -108,6 +160,7 @@
   <div class="wrap shell-head">
     <dl class="facts">
       <div><dt class="eyebrow">VM</dt><dd id="s-name"></dd></div>
+      <div><dt class="eyebrow">Size</dt><dd id="s-size"></dd></div>
       <div><dt class="eyebrow">Address</dt><dd id="s-ip"></dd></div>
       <div><dt class="eyebrow">Ready in</dt><dd id="s-ready"></dd></div>
       <div><dt class="eyebrow">Remaining</dt><dd id="s-left"></dd></div>

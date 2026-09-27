@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -34,13 +35,16 @@ type machine struct {
 	Zone      string    `json:"zone"`
 	Status    string    `json:"status"`
 	IP        string    `json:"ip,omitempty"`
+	Size      string    `json:"size,omitempty"`
 	ExpiresAt time.Time `json:"expiresAt,omitzero"`
 
-	// Filled in from ~/.blink by server.decorate.
+	// Filled in by server.decorate.
 	HasKey bool   `json:"hasKey"`
-	Ready  bool   `json:"ready"`         // running, with a verified host key
-	SSH    string `json:"ssh,omitempty"` // how to connect from your own terminal
+	Ready  bool   `json:"ready"`           // running, with a verified host key
+	SSH    string `json:"ssh,omitempty"`   // how to connect from your own terminal
+	Email  string `json:"email,omitempty"` // whose it is, for admins
 
+	Owner string `json:"-"` // label value naming who started it
 	blink bool
 }
 
@@ -55,6 +59,8 @@ func (m machine) alive() bool {
 // spec is everything needed to create one VM.
 type spec struct {
 	Name, Zone, Machine, Image, Network string
+	Size                                string // menu entry, e.g. small
+	Owner                               string // label value from ownerID
 	TTL                                 time.Duration
 	PublicKey                           string // authorized_keys format
 }
@@ -112,7 +118,7 @@ func newInstance(s spec) *computepb.Instance {
 	return &computepb.Instance{
 		Name:        proto.String(s.Name),
 		MachineType: proto.String(fmt.Sprintf("zones/%s/machineTypes/%s", s.Zone, s.Machine)),
-		Labels:      map[string]string{blinkLabel: "true"},
+		Labels:      map[string]string{blinkLabel: "true", "blink-owner": s.Owner, "blink-size": s.Size},
 		Tags:        &computepb.Tags{Items: []string{blinkLabel}},
 		Disks: []*computepb.AttachedDisk{{
 			Boot:       proto.Bool(true),
@@ -132,8 +138,10 @@ func newInstance(s spec) *computepb.Instance {
 		}},
 		Metadata: &computepb.Metadata{Items: []*computepb.Items{
 			{Key: proto.String("ssh-keys"), Value: proto.String(sshUser + ":" + s.PublicKey)},
-			// Honor the key above even if the project turns on OS Login.
+			// Honor the key above even if the project turns on OS Login, and
+			// only that key: project-wide keys don't get onto students' VMs.
 			{Key: proto.String("enable-oslogin"), Value: proto.String("FALSE")},
+			{Key: proto.String("block-project-ssh-keys"), Value: proto.String("TRUE")},
 			// Lets the guest agent publish the VM's host keys so Blink can check them.
 			{Key: proto.String("enable-guest-attributes"), Value: proto.String("TRUE")},
 		}},
@@ -297,11 +305,14 @@ func portIn(spec string, port int) bool {
 }
 
 func machineFrom(inst *computepb.Instance) machine {
+	labels := inst.GetLabels()
 	m := machine{
 		Name:   inst.GetName(),
 		Zone:   path.Base(inst.GetZone()),
 		Status: inst.GetStatus(),
-		blink:  inst.GetLabels()[blinkLabel] == "true",
+		Size:   labels["blink-size"],
+		Owner:  cmp.Or(labels["blink-owner"], localUser.owner), // VMs from before sign-in
+		blink:  labels[blinkLabel] == "true",
 	}
 	for _, ni := range inst.GetNetworkInterfaces() {
 		for _, ac := range ni.GetAccessConfigs() {

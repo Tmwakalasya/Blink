@@ -8,6 +8,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,7 +41,7 @@ func (f *fakeCloud) Insert(_ context.Context, s spec) (func(context.Context) err
 	if f.insertErr != nil {
 		return nil, f.insertErr
 	}
-	f.vms[s.Name] = machine{Name: s.Name, Zone: s.Zone, Status: "PROVISIONING", blink: true}
+	f.vms[s.Name] = machine{Name: s.Name, Zone: s.Zone, Status: "PROVISIONING", Size: s.Size, Owner: s.Owner, blink: true}
 	if f.onInsert != nil {
 		f.onInsert(s)
 	}
@@ -93,6 +96,12 @@ func (f *fakeCloud) deletedVMs() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.deleted...)
+}
+
+func (f *fakeCloud) put(m machine) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.vms[m.Name] = m
 }
 
 // sshServer is a minimal sshd whose shell echoes its input.
@@ -204,19 +213,90 @@ func newSigner(t *testing.T) ssh.Signer {
 	return signer
 }
 
-func testServer(t *testing.T, c cloud, sshPort string) *server {
-	t.Helper()
-	s := newServer(config{
+func testConfig(t *testing.T) config {
+	return config{
 		Project: "test-project",
 		Zone:    "us-central1-a",
-		Machine: "e2-micro",
 		Image:   "projects/debian-cloud/global/images/family/debian-12",
 		Network: "default",
-		TTL:     30 * time.Minute,
-	}, keyStore{dir: t.TempDir()})
+		State:   t.TempDir(),
+		MaxVMs:  10,
+		Sizes:   "small,medium,large",
+		MaxTTL:  2 * time.Hour,
+	}
+}
+
+// testServer is Blink without sign-in, the way it runs on a laptop.
+func testServer(t *testing.T, c cloud, sshPort string) *server {
+	t.Helper()
+	return serverFor(t, testConfig(t), c, sshPort)
+}
+
+func serverFor(t *testing.T, cfg config, c cloud, sshPort string) *server {
+	t.Helper()
+	s, err := newServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	s.cloud = c
 	s.sshPort = sshPort
-	s.timing = timing{poll: 10 * time.Millisecond, hostKeyGrace: 100 * time.Millisecond, keyChurn: 100 * time.Millisecond}
-	s.status = status{Ready: true}
+	s.timing = timing{
+		poll:         10 * time.Millisecond,
+		hostKeyGrace: 100 * time.Millisecond,
+		keyChurn:     100 * time.Millisecond,
+		shellIdle:    time.Minute,
+	}
+	s.status = status{Ready: true, Project: cfg.Project, Zone: cfg.Zone}
 	return s
+}
+
+const (
+	adminEmail   = "teacher@school.edu"
+	studentEmail = "ana@school.edu"
+	otherEmail   = "ben@school.edu"
+)
+
+// classServer is Blink with sign-in on. Google is faked: a credential is
+// accepted as the email it names.
+func classServer(t *testing.T, cfg config, c cloud, sshPort string, roster ...string) *server {
+	t.Helper()
+	cfg.ClientID = "test-client"
+	cfg.Admins = adminEmail
+	s := serverFor(t, cfg, c, sshPort)
+	s.auth.verify = func(_ context.Context, credential string) (string, error) {
+		if !strings.Contains(credential, "@") {
+			return "", errors.New("bad token")
+		}
+		return credential, nil
+	}
+	if _, err := s.auth.saveRoster(strings.Join(roster, "\n")); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// signIn logs email in and returns its session cookie.
+func signIn(t *testing.T, h http.Handler, email string) *http.Cookie {
+	t.Helper()
+	rec := request(h, "POST", "/api/login", `{"credential":"`+email+`"}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("signing in %s: %d %s", email, rec.Code, rec.Body)
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie {
+			return c
+		}
+	}
+	t.Fatalf("signing in %s set no session cookie", email)
+	return nil
+}
+
+func request(h http.Handler, method, path, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, "http://localhost:8080"+path, strings.NewReader(body))
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }

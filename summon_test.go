@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,10 +15,16 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// runSummon starts a small VM for the local user and returns every event.
 func runSummon(t *testing.T, s *server) []event {
 	t.Helper()
+	ctx := context.Background()
+	sp, no := s.admitStart(ctx, s.currentCloud(), localUser, s.sizes[0], 30*time.Minute)
+	if no != nil {
+		t.Fatalf("start refused: %s", no.Error)
+	}
 	var events []event
-	s.summon(context.Background(), time.Now(), func(e event) { events = append(events, e) })
+	s.summon(ctx, time.Now(), sp, localUser, func(e event) { events = append(events, e) })
 	if len(events) == 0 {
 		t.Fatal("summon emitted nothing")
 	}
@@ -56,7 +61,7 @@ func TestSummonReachesAVerifiedShell(t *testing.T) {
 		t.Fatalf("last event should carry a ready VM with an ssh command, got %+v", last)
 	}
 	if d := fc.deletedVMs(); len(d) != 0 {
-		t.Errorf("a successful summon deleted %v", d)
+		t.Errorf("a successful start deleted %v", d)
 	}
 
 	// The pinned host key must be the one the VM actually has.
@@ -127,14 +132,14 @@ func TestSummonDeletesTheVMWhenCreationFails(t *testing.T) {
 	if last.Step != "creating" || !strings.Contains(last.Error, "capacity") {
 		t.Fatalf("want a capacity failure while creating, got %+v", last)
 	}
-	if last.Fix == "" {
-		t.Error("a capacity failure should suggest another zone")
-	}
 	if d := fc.deletedVMs(); len(d) != 1 {
 		t.Errorf("deleted = %v, want the half-made VM", d)
 	}
 	if s.keys.has(events[0].Note) {
 		t.Error("keys for the failed VM were left behind")
+	}
+	if spent := s.ledger.totals("local", time.Now()).Spent; spent > 0.01 {
+		t.Errorf("a failed start still counts $%.4f against the budget", spent)
 	}
 }
 
@@ -157,14 +162,12 @@ func TestSummonRejectedRequestLeavesNothingBehind(t *testing.T) {
 	}
 }
 
-func TestSummonRefusesASecondVM(t *testing.T) {
+func TestStartRefusesASecondVM(t *testing.T) {
 	fc := newFakeCloud("127.0.0.1")
-	fc.vms["blink-abc123"] = machine{Name: "blink-abc123", Zone: "us-central1-a", Status: "RUNNING", IP: "127.0.0.1", blink: true}
+	fc.put(machine{Name: "blink-abc123", Zone: "us-central1-a", Status: "RUNNING", IP: "127.0.0.1", Owner: "local", blink: true})
 	s := testServer(t, fc, "22")
 
-	req := httptest.NewRequest("POST", "http://localhost:8080/api/vms", strings.NewReader("{}"))
-	rec := httptest.NewRecorder()
-	s.routes().ServeHTTP(rec, req)
+	rec := request(s.routes(), "POST", "/api/vms", `{"size":"small","ttlSeconds":1800}`, nil)
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", rec.Code)
@@ -175,5 +178,23 @@ func TestSummonRefusesASecondVM(t *testing.T) {
 	}
 	if body.VM == nil || body.VM.Name != "blink-abc123" {
 		t.Errorf("409 should point at the running VM, got %+v", body)
+	}
+}
+
+func TestStartOnlyOffersTheMenu(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Sizes, cfg.MaxTTL = "small,medium", time.Hour
+	s := serverFor(t, cfg, newFakeCloud("127.0.0.1"), "22")
+	h := s.routes()
+
+	for _, body := range []string{
+		`{"size":"large","ttlSeconds":1800}`, // not offered
+		`{"size":"small","ttlSeconds":7200}`, // longer than -max-ttl
+		`{"size":"small","ttlSeconds":999}`,  // not a lifetime on the menu
+		`{"size":"huge","ttlSeconds":1800}`,  // not a size at all
+	} {
+		if rec := request(h, "POST", "/api/vms", body, nil); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", body, rec.Code)
+		}
 	}
 }

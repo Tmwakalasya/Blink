@@ -1,5 +1,5 @@
-// Blink puts a real Google Cloud VM, and a shell into it, one click away.
-// Every VM it creates deletes itself when its timer runs out.
+// Blink starts temporary Linux VMs on Google Cloud and opens their terminals
+// in the browser. Each VM is deleted when its lifetime runs out.
 package main
 
 import (
@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,42 +24,58 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
+// config is set by flags, which default to BLINK_* environment variables so
+// Blink can be configured on Cloud Run.
 type config struct {
-	Addr    string
-	Project string
-	Zone    string
-	Machine string
-	Image   string
-	Network string
-	TTL     time.Duration
-	Open    bool
+	Addr        string
+	Project     string
+	Zone        string
+	Image       string
+	Network     string
+	Open        bool
+	State       string        // keys, ledger, class list
+	ClientID    string        // Google OAuth client ID; turns on sign-in
+	Admins      string        // emails, comma separated
+	Budget      float64       // dollars; 0 is no limit
+	MaxVMs      int           // across everyone
+	WeeklyHours float64       // per person; 0 is no limit
+	Sizes       string        // menu entries to offer
+	MaxTTL      time.Duration // longest lifetime to offer
 }
 
 func main() {
-	var cfg config
-	flag.StringVar(&cfg.Addr, "addr", "localhost:8080", "address to serve the page on")
-	flag.StringVar(&cfg.Project, "project", "", "Google Cloud project ID (default: your gcloud project)")
-	flag.StringVar(&cfg.Zone, "zone", "us-central1-a", "zone to create VMs in")
-	flag.StringVar(&cfg.Machine, "machine", "e2-micro", "machine type")
-	flag.StringVar(&cfg.Image, "image", "projects/debian-cloud/global/images/family/debian-12", "boot disk image")
-	flag.StringVar(&cfg.Network, "network", "default", "VPC network for the VMs")
-	flag.DurationVar(&cfg.TTL, "ttl", 30*time.Minute, "how long a VM lives before Google deletes it")
-	flag.BoolVar(&cfg.Open, "open", true, "open the page in your browser")
-	flag.Parse()
+	home, _ := os.UserHomeDir() // may be unset in a container, where -state is set anyway
+	port := os.Getenv("PORT")   // set on Cloud Run
+	addr := "localhost:8080"
+	if port != "" {
+		addr = ":" + port
+	}
 
-	if cfg.TTL < time.Minute || cfg.TTL > 24*time.Hour {
-		log.Fatal("blink: -ttl must be between 1m and 24h")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatalf("blink: %v", err)
-	}
+	var cfg config
+	flag.StringVar(&cfg.Addr, "addr", addr, "address to serve the page on")
+	flag.StringVar(&cfg.Project, "project", "", "Google Cloud project ID (default: your gcloud project)")
+	flag.StringVar(&cfg.Zone, "zone", env("BLINK_ZONE", "us-central1-a"), "zone to create VMs in")
+	flag.StringVar(&cfg.Image, "image", env("BLINK_IMAGE", "projects/debian-cloud/global/images/family/debian-12"), "boot disk image")
+	flag.StringVar(&cfg.Network, "network", env("BLINK_NETWORK", "default"), "VPC network for the VMs")
+	flag.BoolVar(&cfg.Open, "open", port == "", "open the page in your browser")
+	flag.StringVar(&cfg.State, "state", env("BLINK_STATE", filepath.Join(home, ".blink")), "directory for keys, the usage ledger and the class list")
+	flag.StringVar(&cfg.ClientID, "client-id", env("BLINK_CLIENT_ID", ""), "Google OAuth client ID; turns on sign-in")
+	flag.StringVar(&cfg.Admins, "admins", env("BLINK_ADMINS", ""), "emails that manage the class list, comma separated")
+	flag.Float64Var(&cfg.Budget, "budget", envNumber("BLINK_BUDGET", 0), "stop starting VMs once estimated spending reaches this many dollars (0: no limit)")
+	flag.IntVar(&cfg.MaxVMs, "max-vms", int(envNumber("BLINK_MAX_VMS", 10)), "most VMs running at once, across everyone")
+	flag.Float64Var(&cfg.WeeklyHours, "weekly-hours", envNumber("BLINK_WEEKLY_HOURS", 0), "VM hours each person gets per week (0: no limit)")
+	flag.StringVar(&cfg.Sizes, "sizes", env("BLINK_SIZES", "small,medium,large"), "sizes to offer: small, medium, large")
+	flag.DurationVar(&cfg.MaxTTL, "max-ttl", envDuration("BLINK_MAX_TTL", 2*time.Hour), "longest lifetime to offer")
+	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	cfg.Project = findProject(ctx, cfg.Project)
-	s := newServer(cfg, keyStore{dir: filepath.Join(home, ".blink")})
+	s, err := newServer(cfg)
+	if err != nil {
+		log.Fatalf("blink: %v", err)
+	}
 	st := s.preflight(ctx)
 	if st.Ready {
 		s.pruneKeys(ctx)
@@ -72,7 +89,7 @@ func main() {
 	if strings.HasPrefix(cfg.Addr, ":") {
 		url = "http://localhost" + cfg.Addr
 	}
-	printBanner(url, st)
+	printBanner(url, cfg, st)
 
 	srv := &http.Server{Handler: s.routes(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -87,18 +104,39 @@ func main() {
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("blink: %v", err)
 	}
-	fmt.Println("\n  Stopped. Running VMs are still deleted when their timer runs out.")
+	fmt.Println("\n  Stopped. Running VMs are still deleted when their lifetime runs out.")
+}
+
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envNumber(key string, def float64) float64 {
+	if n, err := strconv.ParseFloat(os.Getenv(key), 64); err == nil {
+		return n
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(key)); err == nil {
+		return d
+	}
+	return def
 }
 
 // findProject looks where gcloud users would expect: the flag, the usual
 // environment variables, gcloud's own config, then whatever project the
-// Application Default Credentials carry.
+// Application Default Credentials carry (on Cloud Run, the service's own).
 func findProject(ctx context.Context, flagValue string) string {
 	if flagValue != "" {
 		return flagValue
 	}
-	for _, env := range []string{"BLINK_PROJECT", "GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT"} {
-		if v := os.Getenv(env); v != "" {
+	for _, key := range []string{"BLINK_PROJECT", "GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT"} {
+		if v := os.Getenv(key); v != "" {
 			return v
 		}
 	}
@@ -115,11 +153,23 @@ func findProject(ctx context.Context, flagValue string) string {
 	return ""
 }
 
-func printBanner(url string, st status) {
+func printBanner(url string, cfg config, st status) {
 	fmt.Printf("\n  blink  %s\n", url)
 	if st.Project != "" {
-		fmt.Printf("  %s · %s (%s) · %s · deleted after %s\n",
-			st.Project, st.Zone, st.Place, st.Machine, formatTTL(time.Duration(st.TTL)*time.Second))
+		fmt.Printf("  %s · %s (%s) · sizes %s · up to %s\n", st.Project, st.Zone, st.Place, cfg.Sizes, formatTTL(cfg.MaxTTL))
+	}
+	var limits []string
+	if cfg.ClientID != "" {
+		limits = append(limits, "sign-in on")
+	}
+	if cfg.Budget > 0 {
+		limits = append(limits, fmt.Sprintf("budget $%.2f", cfg.Budget))
+	}
+	if cfg.WeeklyHours > 0 {
+		limits = append(limits, fmt.Sprintf("%s per person per week", hoursText(cfg.WeeklyHours)))
+	}
+	if len(limits) > 0 {
+		fmt.Printf("  %s\n", strings.Join(limits, " · "))
 	}
 	switch {
 	case st.Problem != "":

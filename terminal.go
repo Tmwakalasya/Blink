@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -14,10 +13,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// The terminal is a WebSocket between xterm.js in the page and an SSH session
-// on the VM. The page sends JSON: {"type":"stdin","data":"..."} for keystrokes
-// and {"type":"resize","cols":N,"rows":N} when its size changes. Blink sends
-// the shell's output back as binary frames.
+// The terminal is a WebSocket between xterm.js in the page and a shell on the
+// VM. The page sends JSON: {"type":"stdin","data":"..."} for keystrokes and
+// {"type":"resize","cols":N,"rows":N} when its size changes. Blink sends the
+// shell's output back as binary frames.
 
 type termMessage struct {
 	Type string `json:"type"`
@@ -30,86 +29,57 @@ type termMessage struct {
 // close reason says why.
 const statusCantConnect websocket.StatusCode = 4000
 
-func (s *server) handleTerminal(w http.ResponseWriter, r *http.Request) {
+func (s *server) handleTerminal(w http.ResponseWriter, r *http.Request, u user) {
 	conn, err := websocket.Accept(w, r, nil) // refuses other origins
 	if err != nil {
 		return
 	}
 	defer conn.CloseNow()
 	conn.SetReadLimit(1 << 20) // room for big pastes
+	ctx := r.Context()
 
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	client, sess, stdin, err := s.openShell(ctx, r)
+	m, err := s.ownedVM(ctx, r.PathValue("zone"), r.PathValue("name"), u)
+	if err == nil && (m.Status != "RUNNING" || m.IP == "") {
+		err = errors.New(m.Name + " isn't running.")
+	}
+	var sh *shell
+	if err == nil {
+		sh, err = s.shells.get(m.Name, func() (*shell, error) {
+			return s.openShell(ctx, m, dimension(r, "cols", 80, 10, 500), dimension(r, "rows", 24, 5, 200))
+		})
+	}
+	if err == nil && !sh.attach(conn) {
+		err = errors.New("That session just ended. Reconnect to start a new one.")
+	}
 	if err != nil {
-		conn.Close(statusCantConnect, closeReason(err))
-		return
-	}
-	defer client.Close()
-	defer sess.Close()
-
-	out := wsWriter{ctx: ctx, conn: conn}
-	sess.Stdout, sess.Stderr = out, out
-	if err := sess.Shell(); err != nil {
-		conn.Close(statusCantConnect, closeReason(err))
-		return
-	}
-	go keepAlive(ctx, client)
-	go func() {
-		defer sess.Close()
-		for {
-			_, data, err := conn.Read(ctx)
-			if err != nil {
-				return
-			}
-			var msg termMessage
-			if json.Unmarshal(data, &msg) != nil {
-				continue
-			}
-			switch msg.Type {
-			case "stdin":
-				io.WriteString(stdin, msg.Data)
-			case "resize":
-				if msg.Cols > 0 && msg.Rows > 0 {
-					sess.WindowChange(msg.Rows, msg.Cols)
-				}
-			}
+		if errors.Is(err, errNotFound) {
+			err = errors.New(r.PathValue("name") + " is gone.")
 		}
-	}()
-	sess.Wait()
-	conn.Close(websocket.StatusNormalClosure, "session ended")
+		conn.Close(statusCantConnect, closeReason(err))
+		return
+	}
+	defer sh.detach(conn)
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		var msg termMessage
+		if json.Unmarshal(data, &msg) == nil {
+			sh.input(msg)
+		}
+	}
 }
 
-// openShell connects to the VM named in the request and starts a PTY on it.
-func (s *server) openShell(ctx context.Context, r *http.Request) (*ssh.Client, *ssh.Session, io.Writer, error) {
-	zone, name := r.PathValue("zone"), r.PathValue("name")
-	if !validZone(zone) || !validName(name) {
-		return nil, nil, nil, errors.New("That isn't a Blink VM.")
-	}
-	c := s.currentCloud()
-	if c == nil {
-		return nil, nil, nil, errors.New("Blink isn't connected to Google Cloud yet.")
-	}
-	m, err := c.Get(ctx, zone, name)
-	switch {
-	case errors.Is(err, errNotFound):
-		return nil, nil, nil, errors.New(name + " is gone.")
-	case err != nil:
-		problem, _ := s.explain(err)
-		return nil, nil, nil, errors.New(problem)
-	case !m.blink:
-		return nil, nil, nil, errors.New(name + " wasn't made by Blink.")
-	case m.Status != "RUNNING" || m.IP == "":
-		return nil, nil, nil, errors.New(name + " isn't running.")
-	}
-	signer, err := s.keys.signer(name)
+// openShell connects to the VM and starts a shell on a PTY of the given size.
+func (s *server) openShell(ctx context.Context, m machine, cols, rows int) (*shell, error) {
+	signer, err := s.keys.signer(m.Name)
 	if err != nil {
-		return nil, nil, nil, errors.New("This computer doesn't have the key for " + name + ".")
+		return nil, errors.New("Blink doesn't have the key for " + m.Name + ".")
 	}
-	checkHost, err := s.keys.hostKeyCallback(name)
+	checkHost, err := s.keys.hostKeyCallback(m.Name)
 	if err != nil {
-		return nil, nil, nil, errors.New(name + " is still starting.")
+		return nil, errors.New(m.Name + " is still starting.")
 	}
 	client, err := dialSSH(ctx, net.JoinHostPort(m.IP, s.sshPort), &ssh.ClientConfig{
 		User:            sshUser,
@@ -117,25 +87,32 @@ func (s *server) openShell(ctx context.Context, r *http.Request) (*ssh.Client, *
 		HostKeyCallback: checkHost,
 	})
 	if err != nil {
-		return nil, nil, nil, errors.New("Couldn't reach " + name + " over SSH.")
+		return nil, errors.New("Couldn't reach " + m.Name + " over SSH.")
 	}
 	sess, err := client.NewSession()
+	if err == nil {
+		modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
+		err = sess.RequestPty("xterm-256color", rows, cols, modes)
+	}
 	if err != nil {
 		client.Close()
-		return nil, nil, nil, err
-	}
-	cols, rows := dimension(r, "cols", 80, 10, 500), dimension(r, "rows", 24, 5, 200)
-	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
-	if err := sess.RequestPty("xterm-256color", rows, cols, modes); err != nil {
-		client.Close()
-		return nil, nil, nil, err
+		return nil, err
 	}
 	stdin, err := sess.StdinPipe()
 	if err != nil {
 		client.Close()
-		return nil, nil, nil, err
+		return nil, err
 	}
-	return client, sess, stdin, nil
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		client.Close()
+		return nil, err
+	}
+	if err := sess.Shell(); err != nil {
+		client.Close()
+		return nil, err
+	}
+	return startShell(client, sess, stdout, stdin, s.timing.shellIdle), nil
 }
 
 // keepAlive pings the VM every 20 seconds and hangs up if it stops answering,
@@ -166,18 +143,6 @@ func keepAlive(ctx context.Context, c *ssh.Client) {
 			return
 		}
 	}
-}
-
-type wsWriter struct {
-	ctx  context.Context
-	conn *websocket.Conn
-}
-
-func (w wsWriter) Write(p []byte) (int, error) {
-	if err := w.conn.Write(w.ctx, websocket.MessageBinary, p); err != nil {
-		return 0, err
-	}
-	return len(p), nil
 }
 
 func dimension(r *http.Request, key string, def, lo, hi int) int {
