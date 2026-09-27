@@ -2,6 +2,10 @@
 
 Temporary Linux VMs on Google Cloud, with a terminal in the browser. Pick a size and how long you need it; Blink starts the VM, opens its shell on the page, and Compute Engine deletes it when the time is up.
 
+The launch screen offers Terminal (Small), Development (Medium), and Compute (Large) workspaces, with an estimated cost for the selected duration. Development for one hour is the initial selection when available; Blink remembers later choices. Machine, image, and zone details are expandable.
+
+Workspaces are disposable: push your code or download your files before leaving. Blink shows a warning in the last five minutes, provides saving instructions, and asks for confirmation before ending a session early.
+
 Run it on your laptop for yourself, or on Cloud Run to share it: people sign in with Google, and Blink keeps spending under a budget you set. Medium and Large VMs open VS Code in the browser.
 
 ## On your laptop
@@ -64,7 +68,9 @@ Estimates are for us-central1 and include the public IP and the 10 GB balanced d
 3. **Boot**: Blink waits for port 22 to answer.
 4. **SSH**: Blink checks the VM's host key against the one Google published for it, then opens a shell on the page.
 
-The shell lives on the server, so reloading the page, or Cloud Run cutting a connection after an hour, reattaches to it with recent output intact.
+The shell lives on the server, so reloading the page, or Cloud Run cutting a connection after an hour, reattaches to it with recent output intact **while the same Blink process is alive**. A terminal disconnected for ten minutes closes. Restarting Blink loses that terminal session; reconnecting opens a new shell on the existing VM.
+
+If Blink restarts during VM setup, it resumes SSH verification using the saved key and existing VM. This recovery is bounded by the normal setup timeouts; failures are logged and retain the key and usage reservation. Deletion only releases a reservation after Blink observes that the VM is gone. A lost creation response or unsuccessful deletion keeps the reservation until resolved or its scheduled lifetime expires. The browser distinguishes an unavailable status check from a deleted workspace.
 
 ## Settings
 
@@ -97,6 +103,9 @@ Each flag also reads an environment variable, which is how Cloud Run sets them.
 
 ```sh
 go test -race ./...
+node --test ui_test.cjs
 ```
 
 The tests cover starting VMs, sign-in, the limits and the terminal, against a fake Compute Engine and a real in-process SSH server, so they never touch your Google Cloud project.
+
+The dependency-free Node checks cover launch choices and costs, budget limits, failed status checks, expiry warnings, and deletion confirmation. They simulate browser APIs and do not replace rendered desktop/mobile checks.

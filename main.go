@@ -79,6 +79,7 @@ func main() {
 	st := s.preflight(ctx)
 	if st.Ready {
 		s.pruneKeys(ctx)
+		go s.recoverStarts(ctx)
 	}
 
 	ln, err := net.Listen("tcp", cfg.Addr)

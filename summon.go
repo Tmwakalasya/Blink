@@ -116,11 +116,16 @@ func (s *server) admitStart(ctx context.Context, c cloud, u user, sz size, ttl t
 		m, err := c.Get(gctx, cmp.Or(prev.Zone, s.cfg.Zone), prev.VM)
 		cancel()
 		switch {
-		case err == nil && m.alive():
+		case err == nil:
 			s.decorate(&m, u)
-			return spec{}, &refusal{code: http.StatusConflict, apiError: apiError{Error: m.Name + " is still running.", VM: &m}}
-		case err == nil || errors.Is(err, errNotFound):
-			s.ledger.end(prev.VM, time.Now()) // gone early, e.g. deleted in the console
+			return spec{}, &refusal{code: http.StatusConflict, apiError: apiError{Error: m.Name + " still exists. End that session before starting another.", VM: &m}}
+		case errors.Is(err, errNotFound):
+			if s.keys.has(prev.VM) && !s.keys.pinned(prev.VM) {
+				return spec{}, no(http.StatusConflict, "%s has an unresolved start. Its usage is still reserved; check it before starting another workspace.", prev.VM)
+			}
+			if err := s.ledger.end(prev.VM, time.Now()); err != nil {
+				return spec{}, no(http.StatusInternalServerError, "Couldn't update the previous VM's usage: %v", err)
+			}
 		default:
 			problem, fix := s.explain(err)
 			return spec{}, &refusal{code: http.StatusBadGateway, apiError: apiError{Error: problem, Fix: fix}}
@@ -171,15 +176,36 @@ func (s *server) summon(ctx context.Context, start time.Time, sp spec, u user, e
 		if errors.Is(err, context.DeadlineExceeded) {
 			problem, fix = s.timedOut(step)
 		}
-		emit(event{Step: step, At: at(), Error: problem, Fix: fix})
-		if created {
-			// Don't leave a broken VM running until its lifetime ends.
-			dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			c.Delete(dctx, sp.Zone, sp.Name)
-			cancel()
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		// A response can be lost after Insert succeeded. Check the named VM
+		// before deciding there is nothing to clean up.
+		if !created {
+			m, lookupErr := c.Get(dctx, sp.Zone, sp.Name)
+			if lookupErr == nil {
+				if !m.blink || m.Owner != sp.Owner {
+					emit(event{Step: step, At: at(), Error: problem + " The VM name is already in use; no existing VM was deleted.", Fix: fix})
+					return
+				}
+				created = true
+			} else {
+				var networkErr net.Error
+				if !errors.Is(lookupErr, errNotFound) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.As(err, &networkErr) {
+					emit(event{Step: step, At: at(), Error: problem + " Creation could not be ruled out. The key and full usage reservation have been kept; check the VM before retrying.", Fix: fix})
+					return
+				}
+			}
 		}
-		s.keys.remove(sp.Name)
-		s.ledger.end(sp.Name, time.Now())
+		if created {
+			if cleanupErr := s.deleteVM(dctx, c, sp.Zone, sp.Name); cleanupErr != nil {
+				problem += " Cleanup failed: " + cleanupErr.Error()
+			} else {
+				problem += " The VM was deleted."
+			}
+		} else if cleanupErr := s.forgetVM(sp.Name); cleanupErr != nil {
+			problem += " Cleanup failed: " + cleanupErr.Error()
+		}
+		emit(event{Step: step, At: at(), Error: problem, Fix: fix})
 	}
 
 	signer, pub, err := s.keys.create(sp.Name)
@@ -243,7 +269,7 @@ func (s *server) summon(ctx context.Context, start time.Time, sp spec, u user, e
 func (s *server) timedOut(step string) (problem, fix string) {
 	switch step {
 	case "creating":
-		return "Google took more than 3 minutes to start the VM, so Blink gave up and deleted it.", ""
+		return "Google took more than 3 minutes to start the VM, so Blink stopped setup.", ""
 	case "booting":
 		return "The VM started, but nothing answered on port 22. Usually a firewall rule is missing. Some campus and office networks also block outgoing SSH.", s.firewallFix()
 	case "ssh":
@@ -301,7 +327,10 @@ func (s *server) untilSSH(ctx context.Context, c cloud, m machine, addr string, 
 	began := time.Now()
 	var mismatchSince time.Time
 	for {
-		published, _ := c.HostKeys(ctx, m.Zone, m.Name)
+		published, err := c.HostKeys(ctx, m.Zone, m.Name)
+		if err != nil {
+			return nil, false, fmt.Errorf("couldn't verify the VM's published host key: %w", err)
+		}
 		tofu := len(published) == 0 && time.Since(began) > s.timing.hostKeyGrace
 		if len(published) > 0 || tofu {
 			key, err := handshake(ctx, addr, signer, published)

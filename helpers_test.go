@@ -22,14 +22,17 @@ import (
 // fakeCloud stands in for Compute Engine. Its VMs "run" at ip, where a test
 // SSH server plays the part of the guest.
 type fakeCloud struct {
-	mu        sync.Mutex
-	ip        string
-	vms       map[string]machine
-	hostKeys  []ssh.PublicKey
-	insertErr error
-	waitErr   error
-	onInsert  func(spec)
-	deleted   []string
+	mu            sync.Mutex
+	ip            string
+	vms           map[string]machine
+	hostKeys      []ssh.PublicKey
+	hostKeysErr   error
+	insertErr     error
+	waitErr       error
+	deleteErr     error
+	deletePending bool
+	onInsert      func(spec)
+	deleted       []string
 }
 
 func newFakeCloud(ip string) *fakeCloud {
@@ -82,14 +85,19 @@ func (f *fakeCloud) List(context.Context) ([]machine, error) {
 func (f *fakeCloud) HostKeys(context.Context, string, string) ([]ssh.PublicKey, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.hostKeys, nil
+	return f.hostKeys, f.hostKeysErr
 }
 
 func (f *fakeCloud) Delete(_ context.Context, _, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	f.deleted = append(f.deleted, name)
-	delete(f.vms, name)
+	if !f.deletePending {
+		delete(f.vms, name)
+	}
 	return nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -233,9 +234,98 @@ func (s *server) firewallFix() string {
 func (s *server) pruneKeys(ctx context.Context) {
 	if c := s.currentCloud(); c != nil {
 		if ms, err := c.List(ctx); err == nil {
+			// An accepted Insert may not be visible yet. Keep keys for all
+			// outstanding reservations until they are resolved or expire.
+			for _, u := range s.ledger.activeVMs(time.Now()) {
+				ms = append(ms, machine{Name: u.VM})
+			}
 			s.keys.prune(ms)
 		}
 	}
+}
+
+// recoverStarts finishes connections interrupted by a Blink restart. The VM
+// labels and existing private key contain everything needed; no second VM is
+// created. The admission guard also prevents two recoveries for the same owner.
+func (s *server) recoverStarts(ctx context.Context) {
+	c := s.currentCloud()
+	if c == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, createTimeout+bootTimeout+sshTimeout)
+	defer cancel()
+	ms, err := c.List(ctx)
+	if err != nil {
+		log.Printf("recover unfinished starts: %v", err)
+		return
+	}
+	seen := make(map[string]bool, len(ms))
+	for _, m := range ms {
+		seen[m.Name] = true
+	}
+	for _, u := range s.ledger.activeVMs(time.Now()) {
+		if !seen[u.VM] {
+			zone := u.Zone
+			if zone == "" {
+				zone = s.cfg.Zone
+			}
+			ms = append(ms, machine{Name: u.VM, Zone: zone, Owner: u.Owner, Status: "PROVISIONING", blink: true})
+		}
+	}
+	var workers sync.WaitGroup
+	for _, m := range ms {
+		s.admit.Lock()
+		if !m.blink || !m.alive() || !s.keys.has(m.Name) || s.keys.pinned(m.Name) || s.starting[m.Owner] {
+			s.admit.Unlock()
+			continue
+		}
+		s.starting[m.Owner] = true
+		s.admit.Unlock()
+		workers.Go(func() {
+			defer func() {
+				s.admit.Lock()
+				delete(s.starting, m.Owner)
+				s.admit.Unlock()
+			}()
+			if err := s.recoverConnection(ctx, c, m); err != nil {
+				// Preserve the key and reservation: a failed connection does
+				// not prove the VM is gone. Expiry still belongs to Google.
+				log.Printf("recover %s: %v (key and usage reservation retained)", m.Name, err)
+			}
+		})
+	}
+	workers.Wait()
+}
+
+func (s *server) recoverConnection(ctx context.Context, c cloud, m machine) error {
+	owner := m.Owner
+	signer, err := s.keys.signer(m.Name)
+	if err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, createTimeout)
+	m, err = s.untilRunning(cctx, c, func(context.Context) error { return nil }, spec{Name: m.Name, Zone: m.Zone})
+	cancel()
+	if err != nil {
+		return err
+	}
+	if !m.blink || m.Owner != owner {
+		return errors.New("VM ownership changed; refusing to recover its connection")
+	}
+	addr := net.JoinHostPort(m.IP, s.sshPort)
+	bctx, cancel := context.WithTimeout(ctx, bootTimeout)
+	err = s.untilListening(bctx, addr)
+	cancel()
+	if err != nil {
+		return err
+	}
+	sctx, cancel := context.WithTimeout(ctx, sshTimeout)
+	defer cancel()
+	key, _, err := s.untilSSH(sctx, c, m, addr, signer)
+	if err != nil {
+		return err
+	}
+	return s.keys.pin(m.Name, addr, key)
 }
 
 func (s *server) currentCloud() cloud {
@@ -369,7 +459,9 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleRecheck(w http.ResponseWriter, r *http.Request, u user) {
-	s.preflight(r.Context())
+	if st := s.preflight(r.Context()); st.Ready {
+		go s.recoverStarts(context.WithoutCancel(r.Context()))
+	}
 	s.handleStatus(w, r)
 }
 
@@ -457,8 +549,10 @@ func (s *server) handleList(w http.ResponseWriter, r *http.Request, u user) {
 }
 
 func (s *server) handleDelete(w http.ResponseWriter, r *http.Request, u user) {
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
 	zone, name := r.PathValue("zone"), r.PathValue("name")
-	_, err := s.ownedVM(r.Context(), zone, name, u)
+	_, err := s.ownedVM(ctx, zone, name, u)
 	switch {
 	case errors.Is(err, errNotFound):
 		// Already gone, perhaps on schedule.
@@ -467,17 +561,48 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request, u user) {
 		writeJSON(w, http.StatusForbidden, apiError{Error: problem, Fix: fix})
 		return
 	default:
-		if err := s.currentCloud().Delete(r.Context(), zone, name); err != nil {
-			problem, fix := s.explain(err)
-			writeJSON(w, http.StatusBadGateway, apiError{Error: problem, Fix: fix})
+		if err := s.deleteVM(ctx, s.currentCloud(), zone, name); err != nil {
+			writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 			return
 		}
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
-	s.ledger.end(name, time.Now())
+	if err := s.forgetVM(name); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: "The VM is gone, but its usage record could not be updated. Retry deletion to finish cleanup."})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteVM retains access and the reservation until absence is observed. A
+// successful Delete request alone only means the cloud accepted the operation.
+func (s *server) deleteVM(ctx context.Context, c cloud, zone, name string) error {
+	if err := c.Delete(ctx, zone, name); err != nil {
+		return fmt.Errorf("deletion could not be confirmed; the VM may still be running: %w", err)
+	}
+	for {
+		_, err := c.Get(ctx, zone, name)
+		if errors.Is(err, errNotFound) {
+			return s.forgetVM(name)
+		}
+		if err != nil {
+			return fmt.Errorf("deletion could not be confirmed; the VM may still be running: %w", err)
+		}
+		if err := sleep(ctx, s.timing.poll); err != nil {
+			return fmt.Errorf("deletion is still pending; the VM's key and usage reservation have been kept: %w", err)
+		}
+	}
+}
+
+func (s *server) forgetVM(name string) error {
+	if err := s.ledger.end(name, time.Now()); err != nil {
+		return fmt.Errorf("VM is gone, but recording its end failed: %w", err)
+	}
 	s.shells.end(name)
 	s.tunnels.end(name)
 	s.keys.remove(name)
-	w.WriteHeader(http.StatusNoContent)
+	return nil
 }
 
 // handleClass shows admins who can sign in, requests to, and this week's usage.
@@ -540,7 +665,7 @@ func (s *server) explain(err error) (problem, fix string) {
 	msg := err.Error()
 	switch {
 	case errors.Is(err, errHostKey):
-		return "The VM answered SSH with a host key Google never published for it, so Blink hung up and deleted the VM. Something may be intercepting the connection.", ""
+		return "The VM answered SSH with a host key Google never published for it, so Blink refused the connection. Something may be intercepting the connection.", ""
 	case strings.Contains(msg, "could not find default credentials"):
 		return "Blink isn't signed in to Google Cloud.", "gcloud auth login --update-adc"
 	case strings.Contains(msg, "invalid_grant"), strings.Contains(msg, "reauth"):

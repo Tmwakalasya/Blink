@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"sync"
@@ -62,11 +63,17 @@ func openLedger(path string) (*ledger, error) {
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
+	line := 0
 	for sc.Scan() {
+		line++
 		var u usage
-		if json.Unmarshal(sc.Bytes(), &u) == nil && u.VM != "" {
-			l.rows[u.VM] = u
+		if err := json.Unmarshal(sc.Bytes(), &u); err != nil {
+			return nil, fmt.Errorf("ledger line %d is invalid; refusing to undercount usage: %w", line, err)
 		}
+		if u.VM == "" {
+			return nil, fmt.Errorf("ledger line %d has no VM; refusing to undercount usage", line)
+		}
+		l.rows[u.VM] = u
 	}
 	return l, sc.Err()
 }
@@ -189,4 +196,17 @@ func (l *ledger) email(vm string) string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.rows[vm].Email
+}
+
+// activeVMs includes reservations whose Insert result may still be unknown.
+func (l *ledger) activeVMs(now time.Time) []usage {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var rows []usage
+	for _, u := range l.rows {
+		if u.active(now) {
+			rows = append(rows, u)
+		}
+	}
+	return rows
 }

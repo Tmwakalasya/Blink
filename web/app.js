@@ -3,11 +3,19 @@ const $ = (id) => document.getElementById(id);
 const STEPS = ['requested', 'creating', 'booting', 'ssh'];
 // What each step says in the boot log, and what the status pill says after it.
 const STEP_LOG = {
-  requested: { key: 'request', after: 'Provisioning' },
-  creating: { key: 'provision', after: 'Booting' },
-  booting: { key: 'boot', after: 'Connecting' },
+  requested: { key: 'request', after: 'Allocating your workspace' },
+  creating: { key: 'provision', after: 'Starting Linux' },
+  booting: { key: 'boot', after: 'Connecting securely' },
   ssh: { key: 'ssh', after: 'Ready' },
 };
+
+const WORKSPACES = {
+  small: { name: 'Terminal', description: 'Quick commands and Linux experiments.' },
+  medium: { name: 'Development', description: 'Your everyday coding workspace.' },
+  large: { name: 'Compute', description: 'More room for builds and heavier tasks.' },
+};
+
+function workspaceName(size) { return WORKSPACES[size?.id]?.name || size?.label || 'Workspace'; }
 
 const state = {
   status: null, // from /api/status
@@ -26,6 +34,7 @@ const state = {
   ending: false,
   expired: false,
   expiredName: '',
+  checkingVMs: false,
 };
 
 init();
@@ -41,8 +50,21 @@ async function init() {
   $('s-copy').addEventListener('click', () => state.vm?.ssh && copy(state.vm.ssh, 'SSH command copied'));
   $('s-ip').addEventListener('click', () => state.vm?.ip && copy(state.vm.ip, 'IP copied'));
   $('s-end').addEventListener('click', end);
+  $('end-dialog').addEventListener('close', () => {
+    if ($('end-dialog').returnValue === 'confirm') deleteWorkspace();
+  });
+  $('save-help').addEventListener('click', () => $('save-dialog').showModal());
+  $('session-save-help').addEventListener('click', () => $('save-dialog').showModal());
   $('tab-editor').addEventListener('click', () => selectTab('editor'));
   $('tab-terminal').addEventListener('click', () => selectTab('terminal'));
+  $('tabs').addEventListener('keydown', (e) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const tab = e.key === 'Home' ? 'editor' : e.key === 'End' ? 'terminal' :
+      $('tab-editor').getAttribute('aria-selected') === 'true' ? 'terminal' : 'editor';
+    selectTab(tab);
+    $(`tab-${tab}`).focus();
+  });
   for (const btn of document.querySelectorAll('.command .copy')) {
     btn.addEventListener('click', () => copy(btn.previousElementSibling.textContent, 'Copied'));
   }
@@ -57,7 +79,7 @@ async function init() {
   if (st.signIn && !st.user) return showSignIn(st);
   show('idle');
   if (st.user?.admin && st.signIn) loadClass();
-  if (st.ready) resume();
+  if (st.ready) await resume();
 }
 
 // ---------- the create page ----------
@@ -72,7 +94,6 @@ function render(st) {
   if (!link.hidden) link.href = `https://console.cloud.google.com/compute/instances?project=${encodeURIComponent(st.project)}`;
   $('where-line').hidden = !u || !st.project;
   $('where').textContent = st.project ? `${st.project} / ${st.zone}` : '';
-  $('dialog-zone').textContent = st.zone ? `${st.zone} · ${st.place}` : '';
   $('conn').hidden = !u;
   $('dot').classList.toggle('off', !st.ready);
   $('conn-text').textContent = st.ready ? 'connected' : 'not connected';
@@ -81,13 +102,13 @@ function render(st) {
   const sizes = st.sizes || [];
   if (!sizes.some((s) => s.id === state.size)) {
     const saved = remembered('size');
-    state.size = sizes.some((s) => s.id === saved) ? saved : sizes[0]?.id;
+    state.size = sizes.some((s) => s.id === saved) ? saved : sizes.find((s) => s.id === 'medium')?.id || sizes[0]?.id;
   }
   $('sizes').replaceChildren(...sizes.map(sizeOption));
   const lifetimes = st.lifetimes || [];
   if (!lifetimes.includes(state.ttl)) {
     const saved = Number(remembered('ttl'));
-    state.ttl = lifetimes.includes(saved) ? saved : lifetimes[0];
+    state.ttl = lifetimes.includes(saved) ? saved : lifetimes.includes(3600) ? 3600 : lifetimes[0];
   }
   $('lifetimes').replaceChildren(...lifetimes.map(lifetimeOption));
 
@@ -101,21 +122,29 @@ function render(st) {
 async function refresh() {
   try {
     render(await api('GET', '/api/status'));
-  } catch {}
+  } catch (e) {
+    renderNotice(`Couldn't refresh usage: ${e.message}. Check the connection before starting another workspace.`, 'Connection interrupted');
+    $('start').disabled = true;
+  }
 }
 
 function sizeOption(s) {
   const row = el('label', 'size-row');
+  const heading = el('span', 'size-heading');
+  heading.append(el('span', 'size-name', workspaceName(s)), el('span', 'radio'));
+  const foot = el('span', 'size-foot');
+  foot.append(el('span', 'size-price', `${money(s.hourly)}/hr`));
+  if (s.id === 'medium') foot.append(el('span', 'recommended', 'Recommended'));
   row.append(
     choice('size', s.id, s.id === state.size, () => {
       state.size = s.id;
       remember('size', s.id);
       updateSummary();
     }),
-    el('span', 'radio'),
-    el('span', 'size-name', s.label),
+    heading,
+    el('span', 'size-description', WORKSPACES[s.id]?.description || 'A fresh Linux workspace.'),
     specLine(s),
-    el('span', 'size-price', `${money(s.hourly)}/hr`),
+    foot,
   );
   return row;
 }
@@ -123,7 +152,6 @@ function sizeOption(s) {
 function specLine(s) {
   const spec = el('span', 'size-spec');
   spec.append(
-    el('span', '', s.machine),
     el('span', '', `${s.cpu.replace(' vCPUs', ' vCPU')} · ${s.memory}`),
     el('span', 'tag', s.editor ? 'VS Code + terminal' : 'terminal'),
   );
@@ -167,6 +195,7 @@ function updateSummary() {
   $('sum-zone').textContent = st.zone || '—';
   $('sum-ttl').textContent = ttlText(state.ttl);
   $('sum-cost').textContent = money(cost);
+  $('sum-description').textContent = `${workspaceName(size)} · ${ttlText(state.ttl)} · ${size.editor ? 'VS Code + terminal' : 'Terminal'}`;
 
   let limit = '';
   if (st.budget && st.budget.used + cost > st.budget.limit) {
@@ -178,7 +207,7 @@ function updateSummary() {
   }
   $('limit-note').hidden = !limit;
   $('limit-note').textContent = limit;
-  $('start').disabled = !st.ready || Boolean(limit);
+  $('start').disabled = !st.ready || Boolean(limit) || state.checkingVMs;
 }
 
 function renderMeters(st) {
@@ -209,7 +238,9 @@ async function recheck() {
   btn.textContent = 'Checking…';
   try {
     render(await api('POST', '/api/status'));
-  } catch {}
+  } catch (e) {
+    renderNotice(e.message, 'Could not check connection');
+  }
   btn.disabled = false;
   btn.textContent = 'Check again';
   if (state.status.ready) resume();
@@ -217,35 +248,44 @@ async function recheck() {
 
 // resume reconnects to the user's VM if it's already up, e.g. after a reload.
 async function resume() {
-  let vms = await listVMs();
-  const ready = vms.find((v) => v.ready);
-  if (ready) return openShell(ready, null);
-  const starting = vms.find((v) => v.hasKey && ['PROVISIONING', 'STAGING', 'RUNNING'].includes(v.status));
-  if (!starting) return;
+  state.checkingVMs = true;
+  updateSummary();
+  try {
+    let vms = await listVMs();
+    const ready = vms.find((v) => v.ready);
+    if (ready) return openShell(ready, null);
+    const starting = vms.find((v) => v.hasKey && ['PROVISIONING', 'STAGING', 'RUNNING'].includes(v.status));
+    if (!starting) return;
 
-  // The page was reloaded while the server was still starting this VM.
-  showProgress(starting.size);
-  setTitle(starting.name);
-  log(0, 'resume', `${starting.name} is still starting`);
-  for (let i = 0; i < 120; i++) {
-    await wait(2000);
-    vms = await listVMs();
-    const vm = vms.find((v) => v.name === starting.name);
-    if (!vm) return fail(`${starting.name} failed to start and was deleted.`);
-    if (vm.ready) {
-      stopClock();
-      return openShell(vm, null);
+    // The server also resumes unfinished SSH verification after a restart.
+    showProgress(starting.size);
+    setTitle(starting.name);
+    log(0, 'resume', `${starting.name} is still starting`);
+    for (let i = 0; i < 120; i++) {
+      await wait(2000);
+      vms = await listVMs();
+      const vm = vms.find((v) => v.name === starting.name);
+      if (!vm) return fail(`${starting.name} is no longer available.`);
+      if (vm.ready) {
+        stopClock();
+        return openShell(vm, null);
+      }
     }
+    fail(`${starting.name} is taking too long to start.`);
+  } catch (e) {
+    if (state.view === 'progress') fail(`Couldn't check your workspace: ${e.message}. Reload to reconnect; your VM may still be running.`);
+    else renderNotice(`Couldn't check existing workspaces: ${e.message}. Reload to reconnect.`, 'Connection interrupted');
+  } finally {
+    state.checkingVMs = false;
+    updateSummary();
   }
-  fail(`${starting.name} is taking too long to start.`);
 }
 
 async function listVMs() {
-  try {
-    return (await api('GET', '/api/vms')).vms || [];
-  } catch {
-    return [];
-  }
+  const vms = (await api('GET', '/api/vms')).vms || [];
+  // Admins can list everyone's VMs, but automatic resume is personal.
+  return state.status?.signIn && state.status.user?.admin
+    ? vms.filter((vm) => vm.email === state.status.user.email) : vms;
 }
 
 // ---------- signing in ----------
@@ -462,12 +502,14 @@ function showProgress(sizeId) {
   stepEl('requested').className = 'active';
   $('log').replaceChildren();
   const size = state.status.sizes?.find((s) => s.id === sizeId);
-  $('p-name').textContent = 'new vm';
-  $('p-title').textContent = 'Creating VM';
-  $('p-size').textContent = size?.label || '—';
+  $('p-name').textContent = 'new workspace';
+  $('p-title').textContent = 'Preparing your workspace.';
+  $('p-description').textContent = "We'll open it here as soon as it's ready.";
+  $('progress-details').open = false;
+  $('p-size').textContent = workspaceName(size);
   $('p-machine').textContent = size?.machine || '—';
   $('p-ttl').textContent = ttlText(state.ttl);
-  setStatus('Provisioning');
+  setStatus('Requesting workspace');
   $('failure').hidden = true;
   show('progress');
   startClock();
@@ -475,7 +517,6 @@ function showProgress(sizeId) {
 
 function setTitle(name) {
   $('p-name').textContent = name;
-  $('p-title').textContent = `Creating ${name}`;
 }
 
 function setStatus(text, kind = '') {
@@ -496,6 +537,8 @@ function fail(message, fix, step, at) {
   if (li) li.className = 'failed';
   log(at ?? elapsed, 'error', message, 'err');
   setStatus('Failed', 'failed');
+  $('p-title').textContent = 'We couldn’t finish setup.';
+  $('p-description').textContent = 'Check the message below before trying again.';
   $('failure-text').textContent = message;
   setFix($('failure-fix'), $('failure-fix-text'), fix);
   $('failure').hidden = false;
@@ -533,19 +576,30 @@ async function openShell(vm, readyIn) {
   state.expired = false;
   state.retries = 0;
   const size = state.status.sizes?.find((s) => s.id === vm.size);
+  $('s-title').textContent = workspaceName(size);
+  $('workspace-details').open = false;
+  $('expiry-notice').hidden = true;
   $('s-name').textContent = vm.name;
   $('s-size').textContent = size ? `${size.label} · ${size.machine}` : '—';
   $('s-ip').textContent = vm.ip || '—';
   $('s-ready').textContent = readyIn != null ? `${readyIn.toFixed(1)}s` : '—';
   $('s-copy').hidden = !vm.ssh;
   $('s-end').hidden = false;
-  resetEnd();
+  $('s-end').disabled = false;
+  $('s-end').textContent = 'End session';
   $('curtain').hidden = true;
   $('tabs').hidden = !vm.editor;
   show('shell');
   selectTab('terminal'); // xterm has to be visible when it first opens
-  await ensureTerminal();
+  try {
+    await ensureTerminal();
+  } catch {
+    connectionStatus('Terminal unavailable', 'failed');
+    curtain('The terminal could not load. Your workspace may still be running. Check your connection and reload to reconnect.', 'Reload', () => location.reload());
+    return;
+  }
   startCountdown(vm.expiresAt);
+  if (state.expired) return;
   connect();
   if (vm.editor) {
     startEditor(vm);
@@ -597,6 +651,8 @@ function stopEditor() {
 function selectTab(tab) {
   $('tab-editor').setAttribute('aria-selected', String(tab === 'editor'));
   $('tab-terminal').setAttribute('aria-selected', String(tab === 'terminal'));
+  $('tab-editor').tabIndex = tab === 'editor' ? 0 : -1;
+  $('tab-terminal').tabIndex = tab === 'terminal' ? 0 : -1;
   $('editor').hidden = tab !== 'editor';
   $('term').hidden = tab !== 'terminal';
   if (tab === 'terminal' && state.term) {
@@ -621,7 +677,7 @@ async function ensureTerminal() {
     lineHeight: 1.25,
     scrollback: 5000,
     theme: {
-      background: '#0b0d0c', foreground: '#e9eae4', cursor: '#e2643f', cursorAccent: '#0b0d0c',
+      background: '#101111', foreground: '#f0f1e9', cursor: '#ffa475', cursorAccent: '#101111',
       selectionBackground: 'rgba(226, 100, 63, 0.3)',
       black: '#242a26', red: '#d9674d', green: '#9dbb8a', yellow: '#dcc07a',
       blue: '#8aa7c4', magenta: '#bf9bbd', cyan: '#8fbdb4', white: '#dcdccd',
@@ -646,6 +702,8 @@ async function ensureTerminal() {
 // output, so the screen starts blank each time.
 function connect() {
   const { vm, term } = state;
+  if (!vm || state.expired || state.ending) return;
+  connectionStatus('Connecting');
   state.ws?.close();
   term.reset();
   const size = new URLSearchParams({ cols: term.cols, rows: term.rows });
@@ -653,6 +711,8 @@ function connect() {
   const ws = new WebSocket(`${scheme}://${location.host}/api/vms/${vm.zone}/${vm.name}/terminal?${size}`);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => {
+    if (state.ws !== ws) return;
+    connectionStatus('Connected', 'pill-ok');
     $('curtain').hidden = true;
     send({ type: 'resize', cols: term.cols, rows: term.rows });
     if (!$('term').hidden) term.focus();
@@ -663,12 +723,14 @@ function connect() {
   };
   ws.onclose = (e) => {
     if (state.ws !== ws || state.ending || state.expired) return;
+    connectionStatus('Disconnected', 'failed');
     if (e.code === 1000) return curtain('Session closed.', 'Reconnect', reconnect);
     if (e.code === 4000) return curtain(e.reason || 'Can’t connect to the VM.', 'Try again', reconnect);
     if (e.code === 4001) return curtain('This terminal is open in another tab.', 'Use it here', reconnect);
     // Dropped: a network blip, a server restart, or Cloud Run's hourly cut.
     // The shell is still there, so reattach quietly.
     if (state.retries < 5) {
+      connectionStatus('Reconnecting');
       state.retries++;
       setTimeout(() => state.ws === ws && connect(), 800 * state.retries);
       return;
@@ -676,6 +738,11 @@ function connect() {
     curtain('Connection lost.', 'Reconnect', reconnect);
   };
   state.ws = ws;
+}
+
+function connectionStatus(text, kind = '') {
+  $('s-status-text').textContent = text;
+  $('s-status').className = `pill ${kind}`;
 }
 
 function reconnect() {
@@ -690,7 +757,14 @@ function send(msg) {
 
 function startCountdown(expiresAt) {
   clearInterval(state.countdown);
-  const end = expiresAt ? Date.parse(expiresAt) : Date.now() + state.ttl * 1000;
+  const end = Date.parse(expiresAt);
+  if (!Number.isFinite(end)) {
+    $('s-left').textContent = 'Unavailable';
+    $('s-left').classList.remove('soon');
+    $('expiry-title').textContent = 'Expiry time is unavailable.';
+    $('expiry-notice').hidden = false;
+    return;
+  }
   const tick = () => {
     const left = Math.ceil((end - Date.now()) / 1000);
     const cell = $('s-left');
@@ -703,10 +777,12 @@ function startCountdown(expiresAt) {
     const m = Math.floor((left % 3600) / 60);
     const s = String(left % 60).padStart(2, '0');
     cell.textContent = h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
-    cell.classList.toggle('soon', left <= 60);
+    cell.classList.toggle('soon', left <= 300);
+    $('expiry-notice').hidden = left > 300;
+    $('expiry-title').textContent = left <= 60 ? 'Less than a minute left. Save your work now.' : 'Your workspace expires in less than 5 minutes.';
   };
-  tick();
   state.countdown = setInterval(tick, 1000);
+  tick();
 }
 
 function expire() {
@@ -717,41 +793,37 @@ function expire() {
   selectTab('terminal');
   $('s-copy').hidden = true;
   $('s-end').hidden = true;
-  curtain(`${state.vm.name} reached the end of its lifetime and was deleted.`, 'Create another VM', backToIdle);
+  $('expiry-notice').hidden = true;
+  connectionStatus('Expired', 'failed');
+  curtain('This session has reached its scheduled end. Google Cloud is scheduled to delete the workspace and its files.', 'Back to workspaces', backToIdle);
 }
 
-let confirmTimer = 0;
-async function end() {
+function end() {
+  $('end-dialog').returnValue = 'cancel';
+  $('end-dialog').showModal();
+}
+
+async function deleteWorkspace() {
   const btn = $('s-end');
-  if (!btn.classList.contains('confirm')) {
-    btn.classList.add('confirm');
-    btn.textContent = 'Confirm delete';
-    confirmTimer = setTimeout(resetEnd, 3000);
-    return;
-  }
-  resetEnd();
   const { vm } = state;
+  if (!vm || state.ending || state.expired) return;
   state.ending = true;
+  connectionStatus('Ending session');
+  btn.textContent = 'Deleting…';
   state.ws?.close();
   btn.disabled = true;
   try {
     await api('DELETE', `/api/vms/${vm.zone}/${vm.name}`);
   } catch (e) {
     btn.disabled = false;
+    btn.textContent = 'End session';
     state.ending = false;
     toast(`Couldn’t delete ${vm.name}: ${e.message}`);
     return connect();
   }
   btn.disabled = false;
   backToIdle();
-  toast(`Deleted ${vm.name}`);
-}
-
-function resetEnd() {
-  clearTimeout(confirmTimer);
-  const btn = $('s-end');
-  btn.classList.remove('confirm');
-  btn.textContent = 'Delete';
+  toast('Workspace deleted.');
 }
 
 function curtain(text, label, action) {
@@ -772,6 +844,8 @@ function show(view) {
   $('shell').hidden = view !== 'shell';
   document.body.classList.toggle('in-shell', view === 'shell');
   if (view !== 'shell') {
+    state.ws?.close();
+    state.ws = null;
     clearInterval(state.countdown);
     stopEditor();
     state.vm = null;
